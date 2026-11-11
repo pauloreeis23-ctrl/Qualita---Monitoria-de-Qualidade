@@ -1,3 +1,7 @@
+/* =====================================================================
+   Qualitá Monitoria - CSS completo (substitui TODO o conteúdo de src/index.css)
+   ===================================================================== */
+
 :root {
   color-scheme: dark;
   --page: #0e0f12;
@@ -7,6 +11,7 @@
   --text: #f2f2f5;
   --muted: #8f919c;
   --accent: #745ed4;
+  --purple: #745ed4;
   background: var(--page);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -23,6 +28,15 @@ body {
 
 button {
   font-family: inherit;
+}
+
+.muted {
+  color: var(--muted);
+  margin: 6px 0 0;
+}
+
+.muted-text {
+  color: var(--muted);
 }
 
 /* ---------- Layout geral ---------- */
@@ -209,6 +223,42 @@ button {
   padding: 30px;
 }
 
+/* ---------- Banner da fonte de dados ---------- */
+.notice {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: #351f1f;
+  color: #e5b0ab;
+  font-size: 13px;
+}
+
+.notice.success {
+  background: #18302c;
+  color: #8fe0cf;
+}
+
+.notice.info {
+  background: #1e1b2e;
+  color: #c3b8f2;
+}
+
+.source-banner {
+  margin: 16px 30px 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.content > .notice:first-child,
+.content > .notice {
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+/* ---------- Filtros ---------- */
 .filterbar {
   display: flex;
   justify-content: space-between;
@@ -222,6 +272,7 @@ button {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
+  align-items: stretch;
 }
 
 .filter {
@@ -246,6 +297,49 @@ button {
   font-size: 13px;
 }
 
+.dropdown {
+  position: relative;
+}
+
+.dropdown-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 21;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.dropdown-menu div {
+  padding: 9px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dropdown-menu div:hover {
+  background: #202126;
+}
+
+.dropdown-menu div.selected {
+  background: var(--purple);
+  color: #fff;
+}
+
+/* ---------- Botões ---------- */
 .secondary-button {
   background: transparent;
   border: 1px solid var(--border);
@@ -261,13 +355,42 @@ button {
 }
 
 .primary-button {
-  background: var(--accent);
+  background: var(--purple);
   color: #fff;
   border: none;
   padding: 10px 16px;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   font-weight: bold;
+  font-size: 13px;
+}
+
+.primary-button:hover {
+  filter: brightness(1.1);
+}
+
+.danger-button {
+  background: transparent;
+  border: 1px solid #5a2e2e;
+  color: #ef8d85;
+  padding: 9px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.danger-button:hover {
+  background: #2a1818;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--purple);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
 }
 
 /* ---------- KPIs ---------- */
@@ -289,6 +412,7 @@ button {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
 }
 
 .kpi-card small {
@@ -320,7 +444,7 @@ button {
   font-size: 12px;
 }
 
-/* ---------- Painéis e tabela ---------- */
+/* ---------- Painéis e tabelas ---------- */
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -341,15 +465,14 @@ button {
   margin-bottom: 20px;
 }
 
-.panel-heading h3 {
-  margin: 0;
-  font-size: 18px;
-}
-
 .panel-heading p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+.table-wrap {
+  overflow-x: auto;
 }
 
 table {
@@ -369,6 +492,7 @@ th {
   color: var(--muted);
   font-size: 11px;
   letter-spacing: 1px;
+  white-space: nowrap;
 }
 
 tbody tr:hover {
@@ -399,6 +523,22 @@ tbody tr:hover {
 .positive { color: #62c9b5; font-size: 12px; font-weight: bold; }
 .negative { color: #ef8d85; font-size: 12px; font-weight: bold; }
 
+td .positive,
+td .negative {
+  font-size: inherit;
+}
+
+.ticket {
+  color: var(--purple);
+  font-weight: bold;
+}
+
+.empty {
+  color: var(--muted);
+  padding: 24px 0;
+  text-align: center;
+}
+
 .rule-block {
   background: #1b1c21;
   border: 1px solid var(--border);
@@ -410,88 +550,15 @@ tbody tr:hover {
   margin: 4px 0 0;
 }
 
-/* ---------- Drawer ---------- */
-.drawer-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  display: flex;
-  justify-content: flex-end;
-  z-index: 50;
-}
-
-.drawer {
-  width: 450px;
-  max-width: 100%;
-  background: var(--panel);
-  height: 100%;
-  padding: 30px;
-  border-left: 1px solid var(--border);
-}
-
-.drawer-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.drawer-header h3 {
-  margin: 0;
-
-  /* ===== COLE ESTE BLOCO NO FINAL DO src/index.css (não apague o que já existe) ===== */
-
-:root {
-  --purple: #745ed4;
-}
-
-.muted {
-  color: var(--muted);
-  margin: 6px 0 0;
-}
-
-/* ---------- Dropdown dos filtros ---------- */
-.dropdown {
-  position: relative;
-}
-
-.dropdown-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-}
-
-.dropdown-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  min-width: 100%;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px;
-  z-index: 21;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-}
-
-.dropdown-menu div {
-  padding: 9px 12px;
-  border-radius: 6px;
+.steps {
+  margin: 10px 0;
+  padding-left: 20px;
   font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
+  line-height: 1.8;
+  color: var(--text);
 }
 
-.dropdown-menu div:hover {
-  background: #202126;
-}
-
-.dropdown-menu div.selected {
-  background: var(--purple);
-  color: #fff;
-}
-
-/* ---------- Campos de formulário ---------- */
+/* ---------- Formulários ---------- */
 .input {
   width: 100%;
   padding: 10px;
@@ -508,10 +575,19 @@ tbody tr:hover {
   border-color: var(--purple);
 }
 
-.input.small {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--muted);
+textarea.input {
+  resize: vertical;
+}
+
+.input.search {
+  width: 300px;
+  align-self: center;
+}
+
+.inline-select {
+  padding: 7px 8px;
+  font-size: 13px;
+  min-width: 170px;
 }
 
 .field-label {
@@ -532,9 +608,10 @@ tbody tr:hover {
   display: flex;
   gap: 12px;
   align-items: flex-end;
+  flex-wrap: wrap;
 }
 
-/* ---------- Cabeçalho de página e avisos ---------- */
+/* ---------- Cabeçalho de seção e selos ---------- */
 .page-actions {
   display: flex;
   justify-content: space-between;
@@ -563,101 +640,6 @@ tbody tr:hover {
   background: #351f1f;
   color: #e5837b;
 }
-
-.notice {
-  margin-top: 16px;
-  padding: 12px 16px;
-  border-radius: 8px;
-  background: #351f1f;
-  color: #e5b0ab;
-  font-size: 13px;
-}
-
-.notice.success {
-  background: #18302c;
-  color: #8fe0cf;
-}
-
-.link-button {
-  background: none;
-  border: none;
-  color: var(--purple);
-  text-decoration: underline;
-  cursor: pointer;
-  font-size: 13px;
-  padding: 0;
-}
-
-.empty {
-  color: var(--muted);
-  padding: 24px 0;
-  text-align: center;
-}
-
-/* ---------- Parâmetros ---------- */
-.block-list {
-  margin-top: 24px;
-  display: grid;
-  gap: 14px;
-}
-
-.block-list .rule-block {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.block-fields {
-  flex: 1;
-  min-width: 0;
-}
-
-.block-weight {
-  width: 100px;
-}
-
-.sim-grid {
-  margin-top: 16px;
-  display: grid;
-  gap: 10px;
-}
-
-.sim-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.sim-item .input {
-  width: 100px;
-}
-
-.sim-result {
-  margin: 20px 0 10px;
-  padding: 16px;
-  background: #121316;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.sim-result strong {
-  font-size: 24px;
-}
-
-.profile-blocks {
-  margin: 10px 0 0;
-  padding-left: 18px;
-  font-size: 13px;
-  line-height: 1.7;
-}
-/* ===== COLE ESTE BLOCO NO FINAL DO src/index.css, DEPOIS do bloco anterior (não apague nada) ===== */
 
 /* ---------- Abas ---------- */
 .tabs {
@@ -688,21 +670,6 @@ tbody tr:hover {
   border-bottom-color: var(--purple);
 }
 
-/* ---------- Botão de ação perigosa ---------- */
-.danger-button {
-  background: transparent;
-  border: 1px solid #5a2e2e;
-  color: #ef8d85;
-  padding: 9px 14px;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.danger-button:hover {
-  background: #2a1818;
-}
-
 /* ---------- Pontos de cor ---------- */
 .dot {
   display: inline-block;
@@ -712,7 +679,7 @@ tbody tr:hover {
   margin-right: 6px;
 }
 
-/* ---------- Parâmetros: barra de distribuição ---------- */
+/* ---------- Parâmetros ---------- */
 .stack-bar {
   display: flex;
   height: 14px;
@@ -736,7 +703,6 @@ tbody tr:hover {
   color: var(--muted);
 }
 
-/* ---------- Parâmetros: lista + editor ---------- */
 .param-layout {
   display: grid;
   grid-template-columns: minmax(280px, 360px) 1fr;
@@ -805,10 +771,6 @@ tbody tr:hover {
   font-weight: bold;
 }
 
-textarea.input {
-  resize: vertical;
-}
-
 .weight-row {
   display: flex;
   align-items: center;
@@ -830,6 +792,47 @@ textarea.input {
 
 .weight-input span {
   color: var(--muted);
+}
+
+.sim-grid {
+  margin-top: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.sim-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.sim-item .input {
+  width: 100px;
+}
+
+.sim-result {
+  margin: 20px 0 10px;
+  padding: 16px;
+  background: #121316;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sim-result strong {
+  font-size: 24px;
+}
+
+.profile-blocks {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 /* ---------- Equipe: cards de times ---------- */
@@ -908,11 +911,47 @@ textarea.input {
   flex: 1;
 }
 
+/* ---------- Drawer ---------- */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 50;
+}
+
+.drawer {
+  width: 450px;
+  max-width: 100%;
+  background: var(--panel);
+  height: 100%;
+  padding: 30px;
+  border-left: 1px solid var(--border);
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.drawer-header h3 {
+  margin: 0;
+}
+
 /* ---------- Responsivo ---------- */
 @media (max-width: 1000px) {
   .param-layout {
     grid-template-columns: 1fr;
   }
-}
-  
+
+  .kpis {
+    grid-template-columns: 1fr !important;
+  }
+
+  .input.search {
+    width: 100%;
+  }
 }
