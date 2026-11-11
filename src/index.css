@@ -1253,3 +1253,109 @@ textarea.input {
     gap: 6px;
   }
 }
+
+/* =====================================================================
+   Login, usuário na lateral e blocos de código
+   ===================================================================== */
+
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--page);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+}
+
+.login-card h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.primary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: none;
+}
+
+.sidebar-user {
+  margin-top: 12px;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.sidebar-user span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.info-grid > div {
+  background: #1b1c21;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.info-grid small {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: bold;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.info-grid strong {
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.code {
+  background: #0e0f12;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+code {
+  background: #27282e;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 12px;
+}
+
+@media (max-width: 1000px) {
+  .info-grid {
+    grid-template-columns: 1fr;
+  }
+}
