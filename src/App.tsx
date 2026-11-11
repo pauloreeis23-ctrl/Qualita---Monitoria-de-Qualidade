@@ -1,37 +1,63 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/* ============================== Tipos ============================== */
+/* =====================================================================
+   TIPOS
+   ===================================================================== */
 
-type Agent = {
-  id: number;
-  name: string;
-  team: string;
-  audits: number;
-  score: number;
-  trend: number;
-  initials: string;
-  color: string;
+type Person = { id: number; name: string; team: string; initials: string; color: string };
+
+type Monitoria = {
+  id: string;
+  date: number | null; // timestamp (início do dia) ou null se a planilha não tiver data
+  week: string;
+  consultor: string;
+  categoria: string;
+  ticket: string;
+  csat: string;
+  resolvida: string;
+  nota: number; // sempre na escala 0 a 100
+  team: string; // vem da planilha, se existir coluna de time
 };
+
+type AgentRow = Person & { audits: number; score: number; trend: number | null };
 
 type Block = { id: number; name: string; weight: number; desc: string };
 
 type Config = { profile: string; minScore: number; targetAudits: number };
 
-/* ============================== Dados iniciais ============================== */
+type FieldMapping = { field: string; label: string; header: string | null };
 
-const DEFAULT_TEAMS = ["Equipe Safira", "Equipe Esmeralda", "Equipe Rubi"];
-const PALETTE = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1"];
-const BLOCK_COLORS = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1", "#4fa3a5", "#d9776a"];
+type SheetState = {
+  status: "demo" | "loading" | "ok" | "error";
+  records: Monitoria[];
+  message: string;
+  syncedAt: number | null;
+  skipped: number;
+  scaleNote: string;
+  mapping: FieldMapping[];
+};
 
-const INITIAL_AGENTS: Agent[] = [
-  { id: 1, name: "Marina Costa", team: "Equipe Safira", audits: 48, score: 96.8, trend: 2.4, initials: "MC", color: "#826be0" },
-  { id: 2, name: "Rafael Martins", team: "Equipe Safira", audits: 45, score: 94.2, trend: 1.8, initials: "RM", color: "#61c5b2" },
-  { id: 3, name: "Ana Carolina", team: "Equipe Esmeralda", audits: 41, score: 91.7, trend: 0.6, initials: "AC", color: "#e5a45c" },
-  { id: 4, name: "Carlos Lima", team: "Equipe Esmeralda", audits: 37, score: 87.4, trend: 1.2, initials: "CL", color: "#5ea3e0" },
-  { id: 5, name: "Bianca Oliveira", team: "Equipe Safira", audits: 34, score: 84.9, trend: 1.1, initials: "BO", color: "#b86bd1" },
-  { id: 6, name: "Diego Freitas", team: "Equipe Esmeralda", audits: 32, score: 78.6, trend: -2.3, initials: "DF", color: "#d9776a" },
-  { id: 7, name: "Juliana Alves", team: "Equipe Rubi", audits: 29, score: 93.1, trend: 3.2, initials: "JA", color: "#4fa3a5" },
-];
+/* =====================================================================
+   CONSTANTES
+   ===================================================================== */
+
+const DAY = 86400000;
+const NO_TEAM = "Sem time";
+const ALL_TEAMS = "Todos os times";
+const ALL_CONSULTANTS = "Todos os consultores";
+
+const PALETTE = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1", "#4fa3a5", "#d9776a"];
+
+const PERIODS: Record<string, number | null> = {
+  "Últimos 7 dias": 7,
+  "Últimos 15 dias": 15,
+  "Últimos 30 dias": 30,
+  "Últimos 90 dias": 90,
+  "Todo o período": null,
+};
+
+/* Link da planilha definido no Vercel (Settings > Environment Variables > VITE_SHEET_CSV_URL) */
+const ENV_URL: string = (((import.meta as any).env?.VITE_SHEET_CSV_URL as string | undefined) ?? "").trim();
 
 const DEFAULT_BLOCKS: Block[] = [
   { id: 1, name: "Empatia e Conexão com o Cliente", weight: 35, desc: "Avalia clareza, tom de voz e escuta ativa." },
@@ -88,17 +114,47 @@ const MARKET_PROFILES: Record<
   },
 };
 
-const PERIODS: Record<string, { factor: number; scoreDelta: number; auditsDelta: number }> = {
-  "Últimos 7 dias": { factor: 0.23, scoreDelta: 1.1, auditsDelta: 3.4 },
-  "Últimos 15 dias": { factor: 0.5, scoreDelta: 2.3, auditsDelta: 6.8 },
-  "Últimos 30 dias": { factor: 1, scoreDelta: 4.2, auditsDelta: 12.5 },
-  "Últimos 90 dias": { factor: 3, scoreDelta: 5.6, auditsDelta: 18.9 },
+/* =====================================================================
+   UTILITÁRIOS
+   ===================================================================== */
+
+const norm = (s: string) =>
+  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim().replace(/\s+/g, " ");
+
+const normHeader = (s: string) => norm(s).replace(/[^a-z0-9]+/g, " ").trim();
+
+const initialsOf = (name: string) =>
+  name.trim().split(/\s+/).map((n) => n[0] ?? "").join("").slice(0, 2).toUpperCase();
+
+const startOfDay = (t: number) => {
+  const d = new Date(t);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 };
 
-const ALL_TEAMS = "Todos os times";
-const ALL_CONSULTANTS = "Todos os consultores";
+const fmt = (n: number, digits = 1) =>
+  n.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
-/* ============================== Utilitários ============================== */
+const fmtDate = (t: number) => new Date(t).toLocaleDateString("pt-BR");
+
+const fmtTime = (t: number) => new Date(t).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+const avg = (list: number[]) => (list.length ? list.reduce((a, b) => a + b, 0) / list.length : 0);
+
+function hashStr(s: string) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function weekLabel(date: number) {
+  const d = new Date(date);
+  const monday = date - ((d.getDay() + 6) % 7) * DAY;
+  const short = (t: number) => new Date(t).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  return `${short(monday)} a ${short(monday + 4 * DAY)}`;
+}
 
 function usePersistentState<T>(key: string, initial: T) {
   const [value, setValue] = useState<T>(() => {
@@ -119,27 +175,415 @@ function usePersistentState<T>(key: string, initial: T) {
   return [value, setValue] as const;
 }
 
-const fmt = (n: number, digits = 1) =>
-  n.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+/* =====================================================================
+   LEITURA DO GOOGLE SHEETS (CSV)
+   ===================================================================== */
 
-const fmtTrend = (t: number) => `${t >= 0 ? "+" : "-"}${fmt(Math.abs(t))}%`;
-
-const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
-
-function weightedScore(list: Agent[]) {
-  const total = list.reduce((sum, a) => sum + a.audits, 0);
-  if (!total) return 0;
-  return list.reduce((sum, a) => sum + a.score * a.audits, 0) / total;
+/* Aceita o link "Publicar na web" (CSV) ou o link normal da planilha (precisa estar como "qualquer pessoa com o link") */
+function resolveSheetUrl(raw: string): string {
+  let url = raw.trim();
+  if (!url) return "";
+  if (/\/spreadsheets\/d\/e\//.test(url)) {
+    url = url.replace("/pubhtml", "/pub");
+    if (!/output=csv/.test(url)) url += (url.includes("?") ? "&" : "?") + "output=csv";
+    return url;
+  }
+  const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) {
+    const gid = url.match(/[#?&]gid=(\d+)/)?.[1];
+    return `https://docs.google.com/spreadsheets/d/${m[1]}/gviz/tq?tqx=out:csv${gid ? `&gid=${gid}` : ""}`;
+  }
+  return url;
 }
 
-/* Junta os times cadastrados com qualquer time que ainda apareça em algum colaborador */
-function unionTeams(teams: string[], agents: Agent[]) {
-  return Array.from(new Set([...teams, ...agents.map((a) => a.team)]));
+function parseCSV(text: string): string[][] {
+  const clean = text.replace(/^\uFEFF/, "");
+  const firstLine = clean.split(/\r?\n/, 1)[0] ?? "";
+  const semicolons = (firstLine.match(/;/g) ?? []).length;
+  const commas = (firstLine.match(/,/g) ?? []).length;
+  const delim = semicolons > commas ? ";" : ",";
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (clean[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cell += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delim) {
+      row.push(cell);
+      cell = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && clean[i + 1] === "\n") i++;
+      row.push(cell);
+      cell = "";
+      rows.push(row);
+      row = [];
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
-/* ============================== Componentes base ============================== */
+const FIELDS = [
+  { field: "consultor", label: "Consultor(a)", keys: ["consultor", "analista", "atendente", "agente", "colaborador"] },
+  { field: "nota", label: "Nota final", keys: ["nota final", "nota geral", "nota", "pontuacao", "score"] },
+  { field: "data", label: "Data", keys: ["data"] },
+  { field: "semana", label: "Semana", keys: ["semana"] },
+  { field: "categoria", label: "Categoria", keys: ["categoria", "fila", "assunto"] },
+  { field: "ticket", label: "ID do ticket", keys: ["id ticket", "ticket", "protocolo", "chamado"] },
+  { field: "csat", label: "Status CSAT", keys: ["status csat", "csat"] },
+  { field: "resolvida", label: "Resolvida?", keys: ["resolvida", "resolvido", "resolucao"] },
+  { field: "time", label: "Time / Equipe", keys: ["time", "equipe"] },
+] as const;
 
-function Icon({ size = 18 }: { name?: string; size?: number }) {
+function findCol(headers: string[], keys: readonly string[]): number {
+  for (const k of keys) {
+    const exact = headers.indexOf(k);
+    if (exact >= 0) return exact;
+  }
+  for (const k of keys) {
+    const i = headers.findIndex((h) => ` ${h} `.includes(` ${k} `));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+function parseNumber(value: string): number {
+  let s = value.trim().replace("%", "").replace(/\s/g, "");
+  if (!s) return NaN;
+  if (s.includes(".") && s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",")) s = s.replace(",", ".");
+  return Number(s);
+}
+
+function parseDateCell(value: string): number | null {
+  const s = value.trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  m = s.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+  if (!m) return null;
+  const day = +m[1];
+  const month = +m[2];
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  let year: number;
+  if (m[3]) {
+    year = +m[3];
+    if (year < 100) year += 2000;
+  } else {
+    const now = Date.now();
+    year = new Date(now).getFullYear();
+    if (new Date(year, month - 1, day).getTime() > now + 7 * DAY) year -= 1;
+  }
+  return new Date(year, month - 1, day).getTime();
+}
+
+function recordsFromCSV(text: string) {
+  const rows = parseCSV(text);
+
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(10, rows.length); i++) {
+    const h = rows[i].map(normHeader);
+    if (findCol(h, FIELDS[0].keys) >= 0 && findCol(h, FIELDS[1].keys) >= 0) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx < 0) {
+    throw new Error(
+      `Não encontrei as colunas de consultor e de nota. Cabeçalhos lidos na primeira linha: ${
+        (rows[0] ?? []).filter((c) => c.trim()).join(" | ") || "(vazio)"
+      }`
+    );
+  }
+
+  const rawHeaders = rows[headerIdx];
+  const headers = rawHeaders.map(normHeader);
+  const idx: Record<string, number> = {};
+  const mapping: FieldMapping[] = FIELDS.map((f) => {
+    const c = findCol(headers, f.keys);
+    idx[f.field] = c;
+    return { field: f.field, label: f.label, header: c >= 0 ? rawHeaders[c].trim() : null };
+  });
+
+  type Raw = Omit<Monitoria, "nota"> & { nota: number };
+  const raw: Raw[] = [];
+  let skipped = 0;
+
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const get = (c: number) => (c >= 0 ? (r[c] ?? "").trim() : "");
+    const consultor = get(idx.consultor);
+    const nota = parseNumber(get(idx.nota));
+    if (!consultor || Number.isNaN(nota)) {
+      skipped++;
+      continue;
+    }
+    const semana = get(idx.semana);
+    const date = parseDateCell(get(idx.data)) ?? parseDateCell(semana);
+    raw.push({
+      id: `r${i}`,
+      date: date === null ? null : startOfDay(date),
+      week: semana || (date !== null ? weekLabel(date) : ""),
+      consultor,
+      categoria: get(idx.categoria),
+      ticket: get(idx.ticket).replace(/^#/, ""),
+      csat: get(idx.csat),
+      resolvida: get(idx.resolvida),
+      nota,
+      team: get(idx.time),
+    });
+  }
+
+  if (raw.length === 0) {
+    throw new Error("Encontrei as colunas, mas nenhuma linha tem consultor e nota válidos.");
+  }
+
+  const max = Math.max(...raw.map((x) => x.nota));
+  const factor = max <= 1 ? 100 : max <= 10 ? 10 : 1;
+  const scaleNote =
+    factor === 1 ? "" : `Notas na escala de 0 a ${factor === 100 ? "1" : "10"} foram convertidas para 0 a 100.`;
+  const records: Monitoria[] = raw.map((x) => ({ ...x, nota: Math.round(x.nota * factor * 10) / 10 }));
+
+  return { records, skipped, scaleNote, mapping };
+}
+
+/* =====================================================================
+   DADOS DE DEMONSTRAÇÃO (usados só enquanto nenhuma planilha estiver conectada)
+   ===================================================================== */
+
+const DEMO_TEAMS = ["Equipe Safira", "Equipe Esmeralda", "Equipe Rubi"];
+
+const DEMO_DEFS = [
+  { name: "Marina Costa", team: "Equipe Safira", base: 96, volume: 16, drift: 0.05 },
+  { name: "Rafael Martins", team: "Equipe Safira", base: 94, volume: 15, drift: 0.04 },
+  { name: "Ana Carolina", team: "Equipe Esmeralda", base: 91.5, volume: 14, drift: 0.02 },
+  { name: "Carlos Lima", team: "Equipe Esmeralda", base: 87, volume: 12, drift: 0.03 },
+  { name: "Bianca Oliveira", team: "Equipe Safira", base: 84.5, volume: 11, drift: 0.03 },
+  { name: "Diego Freitas", team: "Equipe Esmeralda", base: 78.5, volume: 10, drift: -0.06 },
+  { name: "Juliana Alves", team: "Equipe Rubi", base: 93, volume: 10, drift: 0.07 },
+];
+
+const DEMO_PEOPLE: Person[] = DEMO_DEFS.map((d, i) => ({
+  id: i + 1,
+  name: d.name,
+  team: d.team,
+  initials: initialsOf(d.name),
+  color: PALETTE[i % PALETTE.length],
+}));
+
+function mulberry32(seed: number) {
+  return () => {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildDemoRecords(): Monitoria[] {
+  const rand = mulberry32(2026);
+  const today = startOfDay(Date.now());
+  const categories = ["Suporte Operacional", "Suporte Técnico", "eSocial", "Admissão Digital"];
+  const out: Monitoria[] = [];
+  DEMO_DEFS.forEach((d) => {
+    const count = d.volume * 3;
+    for (let k = 0; k < count; k++) {
+      const offset = Math.floor(rand() * 90);
+      const date = today - offset * DAY;
+      const nota = clamp(Math.round((d.base + (rand() - 0.5) * 12 + (45 - offset) * d.drift) * 10) / 10, 40, 100);
+      out.push({
+        id: `d${out.length}`,
+        date,
+        week: weekLabel(date),
+        consultor: d.name,
+        categoria: categories[Math.floor(rand() * categories.length)],
+        ticket: String(650000 + Math.floor(rand() * 20000)),
+        csat: rand() < 0.8 ? "Respondido" : "Não respondido",
+        resolvida: nota >= 85 ? (rand() < 0.92 ? "Sim" : "Não") : rand() < 0.5 ? "Sim" : "Não",
+        nota,
+        team: d.team,
+      });
+    }
+  });
+  return out;
+}
+
+const DEMO_STATE: SheetState = {
+  status: "demo",
+  records: buildDemoRecords(),
+  message: "",
+  syncedAt: null,
+  skipped: 0,
+  scaleNote: "",
+  mapping: [],
+};
+
+/* =====================================================================
+   HOOK DA PLANILHA
+   ===================================================================== */
+
+function useSheet(url: string) {
+  const [state, setState] = useState<SheetState>(
+    url ? { ...DEMO_STATE, status: "loading", records: [] } : DEMO_STATE
+  );
+  const requestId = useRef(0);
+
+  const load = useCallback(async () => {
+    const id = ++requestId.current;
+    if (!url) {
+      setState(DEMO_STATE);
+      return;
+    }
+    setState((s) => ({ ...s, status: "loading", message: "", records: s.status === "ok" ? s.records : [] }));
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) {
+        throw new Error(
+          `O Google respondeu com erro ${res.status}. Confira se a planilha está publicada na web ou compartilhada como “qualquer pessoa com o link”.`
+        );
+      }
+      const text = await res.text();
+      if (/^\s*<(!doctype|html)/i.test(text)) {
+        throw new Error(
+          "O link devolveu uma página (login) em vez dos dados. Publique a planilha na web em formato CSV ou compartilhe como “qualquer pessoa com o link”."
+        );
+      }
+      const result = recordsFromCSV(text);
+      if (id !== requestId.current) return;
+      setState({
+        status: "ok",
+        records: result.records,
+        message: "",
+        syncedAt: Date.now(),
+        skipped: result.skipped,
+        scaleNote: result.scaleNote,
+        mapping: result.mapping,
+      });
+    } catch (err) {
+      if (id !== requestId.current) return;
+      const message =
+        err instanceof TypeError
+          ? "Não foi possível acessar a planilha (permissão ou bloqueio de rede). Confirme que ela está publicada na web em formato CSV."
+          : err instanceof Error
+          ? err.message
+          : "Erro desconhecido ao ler a planilha.";
+      setState((s) => ({ ...s, status: "error", message }));
+    }
+  }, [url]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return [state, load] as const;
+}
+
+/* =====================================================================
+   CÁLCULOS
+   ===================================================================== */
+
+function buildPeople(registered: Person[], records: Monitoria[]): Person[] {
+  /* Se o mesmo nome aparecer duas vezes, o cadastro mais recente (último da lista) vence */
+  const known = new Map<string, Person>();
+  registered.forEach((p) => known.set(norm(p.name), p));
+  records.forEach((r) => {
+    const key = norm(r.consultor);
+    if (!known.has(key)) {
+      known.set(key, {
+        id: -(hashStr(key) + 1),
+        name: r.consultor,
+        team: r.team || NO_TEAM,
+        initials: initialsOf(r.consultor),
+        color: PALETTE[known.size % PALETTE.length],
+      });
+    }
+  });
+  return Array.from(known.values());
+}
+
+function buildTeamList(teams: string[], people: Person[]): string[] {
+  const set = new Set<string>(teams);
+  people.forEach((p) => {
+    if (p.team !== NO_TEAM) set.add(p.team);
+  });
+  const list = Array.from(set);
+  if (people.some((p) => p.team === NO_TEAM)) list.push(NO_TEAM);
+  return list;
+}
+
+function pushTo(map: Map<string, number[]>, key: string, value: number) {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
+function computeRows(people: Person[], records: Monitoria[], days: number | null, now: number): AgentRow[] {
+  const curFrom = days === null ? -Infinity : now - days * DAY;
+  const prevFrom = days === null ? -Infinity : now - 2 * days * DAY;
+  const cur = new Map<string, number[]>();
+  const prev = new Map<string, number[]>();
+
+  records.forEach((r) => {
+    const key = norm(r.consultor);
+    const inCurrent = days === null || r.date === null || r.date >= curFrom;
+    const inPrevious = days !== null && r.date !== null && r.date >= prevFrom && r.date < curFrom;
+    if (inCurrent) pushTo(cur, key, r.nota);
+    else if (inPrevious) pushTo(prev, key, r.nota);
+  });
+
+  return people.map((p) => {
+    const c = cur.get(norm(p.name)) ?? [];
+    const pr = prev.get(norm(p.name)) ?? [];
+    const score = avg(c);
+    const prevScore = avg(pr);
+    return {
+      ...p,
+      audits: c.length,
+      score,
+      trend: c.length && pr.length && prevScore ? ((score - prevScore) / prevScore) * 100 : null,
+    };
+  });
+}
+
+function weightedScore(rows: AgentRow[]) {
+  const total = rows.reduce((sum, r) => sum + r.audits, 0);
+  return total ? rows.reduce((sum, r) => sum + r.score * r.audits, 0) / total : 0;
+}
+
+const isYes = (v: string) => ["sim", "s", "yes", "y", "true", "1", "resolvido", "resolvida"].includes(norm(v));
+const isResponded = (v: string) => norm(v).startsWith("respondid");
+
+function rateOf(list: Monitoria[], field: "resolvida" | "csat", test: (v: string) => boolean): number | null {
+  const filled = list.filter((r) => r[field].trim());
+  return filled.length ? (filled.filter((r) => test(r[field])).length / filled.length) * 100 : null;
+}
+
+/* =====================================================================
+   COMPONENTES BASE
+   ===================================================================== */
+
+function Icon({ size = 18 }: { size?: number }) {
   return <span style={{ fontSize: size, lineHeight: 1, display: "inline-flex" }}>✦</span>;
 }
 
@@ -204,9 +648,22 @@ function Tabs<T extends string>({
   );
 }
 
+function Delta({ value, lowerIsBetter = false, unit = "%" }: { value: number | null; lowerIsBetter?: boolean; unit?: string }) {
+  if (value === null) return <span className="muted-text">—</span>;
+  const good = lowerIsBetter ? value <= 0 : value >= 0;
+  return (
+    <span className={good ? "positive" : "negative"}>
+      {value >= 0 ? "+" : "-"}
+      {fmt(Math.abs(value))}
+      {unit}
+    </span>
+  );
+}
+
 function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => void }) {
   const items = [
     ["dashboard", "Dashboard"],
+    ["monitorias", "Monitorias"],
     ["parameters", "Parâmetros"],
     ["team", "Equipe"],
     ["reports", "Relatórios"],
@@ -246,10 +703,11 @@ function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => vo
 function Header({ page }: { page: string }) {
   const pages: Record<string, [string, string]> = {
     dashboard: ["Dashboard gerencial", "Acompanhe o desempenho da sua operação em tempo real."],
+    monitorias: ["Base de monitorias", "Registros lidos da planilha que alimenta toda a ferramenta."],
     parameters: ["Construtor de parâmetros", "Defina os critérios da avaliação e quanto cada um pesa na nota final."],
     team: ["Gestão de equipe", "Cadastre times e colaboradores e acompanhe os indicadores de cada um."],
-    reports: ["Relatórios analíticos", "Explore tendências e exporte dados consolidados da operação."],
-    settings: ["Configurações e Governança", "Gerencie perfis de mercado, metas e preferências."],
+    reports: ["Relatórios analíticos", "Explore tendências e consolidados da operação."],
+    settings: ["Configurações e Governança", "Fonte de dados, perfis de mercado e metas."],
   };
   const [title, description] = pages[page] ?? pages.dashboard;
   return (
@@ -269,40 +727,118 @@ function Header({ page }: { page: string }) {
   );
 }
 
-/* ============================== Dashboard ============================== */
+function SourceBanner({
+  sheet,
+  reload,
+  goSettings,
+}: {
+  sheet: SheetState;
+  reload: () => void;
+  goSettings: () => void;
+}) {
+  if (sheet.status === "demo") {
+    return (
+      <div className="notice info source-banner">
+        <span>
+          <strong>Modo demonstração:</strong> os números abaixo são fictícios. Conecte a sua planilha para ver os dados reais.
+        </span>
+        <button className="secondary-button" onClick={goSettings}>Conectar planilha</button>
+      </div>
+    );
+  }
+  if (sheet.status === "loading") {
+    return <div className="notice info source-banner">Carregando dados da planilha…</div>;
+  }
+  if (sheet.status === "error") {
+    return (
+      <div className="notice source-banner">
+        <span><strong>Não consegui ler a planilha.</strong> {sheet.message}</span>
+        <span style={{ display: "flex", gap: 8 }}>
+          <button className="secondary-button" onClick={reload}>Tentar de novo</button>
+          <button className="secondary-button" onClick={goSettings}>Ver configurações</button>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="notice success source-banner">
+      <span>
+        <strong>Planilha conectada:</strong> {sheet.records.length.toLocaleString("pt-BR")} monitorias
+        {sheet.syncedAt ? ` · atualizado às ${fmtTime(sheet.syncedAt)}` : ""}
+        {sheet.skipped > 0 ? ` · ${sheet.skipped} linhas ignoradas (sem consultor ou nota)` : ""}
+        {sheet.scaleNote ? ` · ${sheet.scaleNote}` : ""}
+      </span>
+      <button className="secondary-button" onClick={reload}>Atualizar</button>
+    </div>
+  );
+}
+
+/* =====================================================================
+   DASHBOARD
+   ===================================================================== */
 
 function Dashboard({
-  agents,
+  people,
+  records,
   teamList,
   config,
   openAudit,
 }: {
-  agents: Agent[];
+  people: Person[];
+  records: Monitoria[];
   teamList: string[];
   config: Config;
-  openAudit: (agent?: Agent) => void;
+  openAudit: (person?: Person) => void;
 }) {
   const [period, setPeriod] = useState("Últimos 30 dias");
   const [team, setTeam] = useState(ALL_TEAMS);
   const [consultant, setConsultant] = useState(ALL_CONSULTANTS);
 
-  const meta = PERIODS[period];
-  const teamOptions = [ALL_TEAMS, ...teamList];
+  const days = PERIODS[period];
+  const now = Date.now();
+  const curFrom = days === null ? -Infinity : now - days * DAY;
+  const prevFrom = days === null ? -Infinity : now - 2 * days * DAY;
+
+  const teamOf = new Map(people.map((p) => [norm(p.name), p.team]));
+  const matches = (r: Monitoria) =>
+    (team === ALL_TEAMS || (teamOf.get(norm(r.consultor)) ?? NO_TEAM) === team) &&
+    (consultant === ALL_CONSULTANTS || norm(r.consultor) === norm(consultant));
+
+  const current = records.filter((r) => matches(r) && (days === null || r.date === null || r.date >= curFrom));
+  const previous =
+    days === null
+      ? []
+      : records.filter((r) => matches(r) && r.date !== null && r.date >= prevFrom && r.date < curFrom);
+
+  const stats = (list: Monitoria[]) => ({
+    count: list.length,
+    score: avg(list.map((r) => r.nota)),
+    dev: list.length ? (list.filter((r) => r.nota < config.minScore).length / list.length) * 100 : 0,
+  });
+  const cur = stats(current);
+  const prev = stats(previous);
+  const pct = (c: number, p: number) => (p ? ((c - p) / p) * 100 : null);
+  const hasPrev = previous.length > 0;
+
   const consultantOptions = [
     ALL_CONSULTANTS,
-    ...agents.filter((a) => team === ALL_TEAMS || a.team === team).map((a) => a.name),
+    ...people
+      .filter((p) => team === ALL_TEAMS || p.team === team)
+      .map((p) => p.name)
+      .sort((a, b) => a.localeCompare(b, "pt-BR")),
   ];
 
-  const filtered = agents
-    .map((a) => ({ ...a, audits: Math.round(a.audits * meta.factor) }))
-    .filter((a) => (team === ALL_TEAMS || a.team === team) && (consultant === ALL_CONSULTANTS || a.name === consultant))
+  const rows = computeRows(
+    people.filter((p) => (team === ALL_TEAMS || p.team === team) && (consultant === ALL_CONSULTANTS || p.name === consultant)),
+    records,
+    days,
+    now
+  )
+    .filter((r) => r.audits > 0)
     .sort((a, b) => b.score - a.score);
 
-  const avg = weightedScore(filtered);
-  const previousAvg = avg / (1 + meta.scoreDelta / 100);
-  const totalAudits = filtered.reduce((sum, a) => sum + a.audits, 0);
-  const below = filtered.filter((a) => a.audits > 0 && a.score < config.minScore);
-  const deviationRate = totalAudits ? (below.reduce((sum, a) => sum + a.audits, 0) / totalAudits) * 100 : 0;
+  const dated = records.filter((r) => r.date !== null).map((r) => r.date as number);
+  const lastDate = dated.length ? Math.max(...dated) : null;
 
   const clearFilters = () => {
     setPeriod("Últimos 30 dias");
@@ -318,7 +854,7 @@ function Dashboard({
           <Dropdown
             label="TIME"
             value={team}
-            options={teamOptions}
+            options={[ALL_TEAMS, ...teamList]}
             onChange={(value) => {
               setTeam(value);
               setConsultant(ALL_CONSULTANTS);
@@ -329,30 +865,38 @@ function Dashboard({
         <button className="secondary-button" onClick={clearFilters}>Limpar filtros</button>
       </section>
 
+      {current.length === 0 && records.length > 0 && (
+        <div className="notice">
+          Nenhuma monitoria encontrada com esses filtros.
+          {lastDate !== null && ` A última monitoria com data na planilha é de ${fmtDate(lastDate)}.`} Experimente o período
+          “Todo o período”.
+        </div>
+      )}
+
       <section className="kpis">
         <article className="kpi-card" onClick={() => openAudit()} style={{ cursor: "pointer" }}>
           <div className="kpi-header">
             <small>NOTA MÉDIA GERAL</small>
-            <span className="positive">+{fmt(meta.scoreDelta)}%</span>
+            <Delta value={hasPrev ? pct(cur.score, prev.score) : null} />
           </div>
-          <div className="kpi-body"><strong>{fmt(avg)}</strong><span>/ 100</span></div>
-          <p>vs. {fmt(previousAvg)} no período anterior</p>
+          <div className="kpi-body"><strong>{fmt(cur.score)}</strong><span>/ 100</span></div>
+          <p>{hasPrev ? `vs. ${fmt(prev.score)} no período anterior` : "sem período anterior para comparar"}</p>
         </article>
         <article className="kpi-card">
           <div className="kpi-header">
-            <small>AUDITORIAS REALIZADAS</small>
-            <span className="positive">+{fmt(meta.auditsDelta)}%</span>
+            <small>MONITORIAS REALIZADAS</small>
+            <Delta value={hasPrev ? pct(cur.count, prev.count) : null} />
           </div>
-          <div className="kpi-body"><strong>{totalAudits.toLocaleString("pt-BR")}</strong></div>
-          <p>{period.toLowerCase()}</p>
+          <div className="kpi-body"><strong>{cur.count.toLocaleString("pt-BR")}</strong></div>
+          <p>{hasPrev ? `vs. ${prev.count.toLocaleString("pt-BR")} no período anterior` : period.toLowerCase()}</p>
         </article>
         <article className="kpi-card">
           <div className="kpi-header">
             <small>TAXA DE DESVIOS</small>
-            <span className={below.length ? "negative" : "positive"}>{below.length} abaixo da meta</span>
+            <Delta value={hasPrev ? cur.dev - prev.dev : null} lowerIsBetter unit=" p.p." />
           </div>
-          <div className="kpi-body"><strong>{fmt(deviationRate)}%</strong></div>
-          <p>auditorias de consultores abaixo de {config.minScore} pontos</p>
+          <div className="kpi-body"><strong>{fmt(cur.dev)}%</strong></div>
+          <p>monitorias abaixo de {config.minScore} pontos</p>
         </article>
       </section>
 
@@ -362,49 +906,137 @@ function Dashboard({
             <h3>Ranking da equipe</h3>
             <p>Desempenho dos consultores no período selecionado</p>
           </div>
-          <button className="secondary-button" onClick={() => openAudit()}>Ver auditorias</button>
+          <button className="secondary-button" onClick={() => openAudit()}>Ver monitorias</button>
         </div>
-        {filtered.length === 0 ? (
-          <p className="empty">Nenhum consultor encontrado para os filtros selecionados.</p>
+        {rows.length === 0 ? (
+          <p className="empty">Nenhum consultor com monitorias para os filtros selecionados.</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>CONSULTOR</th>
-                <th>TIME</th>
-                <th>AUDITORIAS</th>
-                <th>NOTA MÉDIA</th>
-                <th>EVOLUÇÃO</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((agent, index) => (
-                <tr key={agent.id} onClick={() => openAudit(agent)} style={{ cursor: "pointer" }}>
-                  <td><span className={`rank rank-${index + 1}`}>{index + 1}</span></td>
-                  <td>
-                    <div className="agent">
-                      <span className="avatar" style={{ background: agent.color }}>{agent.initials}</span>
-                      <strong>{agent.name}</strong>
-                    </div>
-                  </td>
-                  <td>{agent.team}</td>
-                  <td>{agent.audits}</td>
-                  <td>{agent.audits ? <><strong>{fmt(agent.score)}</strong> / 100</> : "—"}</td>
-                  <td>
-                    <span className={agent.trend >= 0 ? "positive" : "negative"}>{fmtTrend(agent.trend)}</span>
-                  </td>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>CONSULTOR</th>
+                  <th>TIME</th>
+                  <th>MONITORIAS</th>
+                  <th>NOTA MÉDIA</th>
+                  <th>EVOLUÇÃO</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((row, index) => (
+                  <tr key={row.id} onClick={() => openAudit(row)} style={{ cursor: "pointer" }}>
+                    <td><span className={`rank rank-${index + 1}`}>{index + 1}</span></td>
+                    <td>
+                      <div className="agent">
+                        <span className="avatar" style={{ background: row.color }}>{row.initials}</span>
+                        <strong>{row.name}</strong>
+                      </div>
+                    </td>
+                    <td>{row.team}</td>
+                    <td>{row.audits}</td>
+                    <td>
+                      <strong className={row.score < config.minScore ? "negative" : ""}>{fmt(row.score)}</strong> / 100
+                    </td>
+                    <td><Delta value={row.trend} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </main>
   );
 }
 
-/* ============================== Parâmetros ============================== */
+/* =====================================================================
+   MONITORIAS (tabela da planilha)
+   ===================================================================== */
+
+function Monitorias({ records, config }: { records: Monitoria[]; config: Config }) {
+  const [search, setSearch] = useState("");
+  const [period, setPeriod] = useState("Todo o período");
+  const [limit, setLimit] = useState(100);
+
+  const days = PERIODS[period];
+  const now = Date.now();
+  const q = norm(search);
+
+  const list = records
+    .filter((r) => days === null || r.date === null || r.date >= now - days * DAY)
+    .filter((r) => !q || norm(`${r.consultor} ${r.ticket} ${r.categoria}`).includes(q))
+    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
+
+  return (
+    <main className="content">
+      <div className="page-actions" style={{ marginBottom: 16 }}>
+        <div className="filters">
+          <Dropdown label="PERÍODO" value={period} options={Object.keys(PERIODS)} onChange={(v) => { setPeriod(v); setLimit(100); }} />
+          <input
+            className="input search"
+            placeholder="Buscar consultor, ticket ou categoria"
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setLimit(100); }}
+          />
+        </div>
+        <span className="muted-text">{list.length.toLocaleString("pt-BR")} monitorias</span>
+      </div>
+
+      <div className="panel">
+        {list.length === 0 ? (
+          <p className="empty">Nenhuma monitoria encontrada.</p>
+        ) : (
+          <>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>SEMANA</th>
+                    <th>CONSULTOR(A)</th>
+                    <th>CATEGORIA</th>
+                    <th>ID TICKET</th>
+                    <th>STATUS CSAT</th>
+                    <th>RESOLVIDA?</th>
+                    <th>NOTA FINAL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {list.slice(0, limit).map((m) => (
+                    <tr key={m.id}>
+                      <td>{m.week || "—"}</td>
+                      <td><strong>{m.consultor}</strong></td>
+                      <td>{m.categoria || "—"}</td>
+                      <td>{m.ticket ? <span className="ticket">#{m.ticket}</span> : "—"}</td>
+                      <td>{m.csat || "—"}</td>
+                      <td>{m.resolvida || "—"}</td>
+                      <td>
+                        <strong className={m.nota < config.minScore ? "negative" : ""}>{fmt(m.nota)}</strong> / 100
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {list.length > limit && (
+              <div style={{ textAlign: "center", marginTop: 16 }}>
+                <button className="secondary-button" onClick={() => setLimit(limit + 100)}>
+                  Mostrar mais ({list.length - limit} restantes)
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </main>
+  );
+}
+
+/* =====================================================================
+   PARÂMETROS
+   ===================================================================== */
+
+const BLOCK_COLORS = PALETTE;
 
 function Parameters({
   blocks,
@@ -485,7 +1117,6 @@ function Parameters({
         onChange={setTab}
       />
 
-      {/* Resumo da distribuição de pesos (aparece nas duas abas) */}
       <div className="panel">
         <div className="page-actions">
           <div>
@@ -516,11 +1147,13 @@ function Parameters({
             </span>
           ))}
         </div>
+        <p className="muted" style={{ fontSize: 12, marginTop: 14 }}>
+          Observação: a nota final dos dashboards vem da coluna de nota da planilha. Estes pesos servem para definir o modelo de avaliação e para o simulador.
+        </p>
       </div>
 
       {tab === "edit" && (
         <div className="param-layout">
-          {/* Coluna esquerda: lista de blocos */}
           <div className="panel">
             <div className="page-actions" style={{ marginBottom: 14 }}>
               <h3>Blocos ({blocks.length})</h3>
@@ -551,7 +1184,6 @@ function Parameters({
             </div>
           </div>
 
-          {/* Coluna direita: edição do bloco selecionado */}
           <div className="panel">
             {!selected ? (
               <p className="empty">Selecione ou crie um bloco para editar.</p>
@@ -658,33 +1290,39 @@ function Parameters({
   );
 }
 
-/* ============================== Equipe (Times + Colaboradores) ============================== */
+/* =====================================================================
+   EQUIPE (Times + Colaboradores)
+   ===================================================================== */
 
 function Team({
-  agents,
-  setAgents,
+  people,
+  records,
   teams,
+  teamList,
   setTeams,
+  assignTeam,
   openAudit,
 }: {
-  agents: Agent[];
-  setAgents: (agents: Agent[]) => void;
+  people: Person[];
+  records: Monitoria[];
   teams: string[];
+  teamList: string[];
   setTeams: (teams: string[]) => void;
-  openAudit: (agent?: Agent) => void;
+  assignTeam: (name: string, team: string) => void;
+  openAudit: (person?: Person) => void;
 }) {
   const [view, setView] = useState<"teams" | "people">("teams");
   const [modal, setModal] = useState<"none" | "team" | "person">("none");
   const [teamFilter, setTeamFilter] = useState(ALL_TEAMS);
   const [success, setSuccess] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-
   const [teamName, setTeamName] = useState("");
   const [personName, setPersonName] = useState("");
-  const [personTeam, setPersonTeam] = useState("");
+  const [personTeam, setPersonTeam] = useState(NO_TEAM);
   const [error, setError] = useState("");
 
-  const teamList = unionTeams(teams, agents);
+  const rows = computeRows(people, records, null, Date.now());
+  const realTeams = teamList.filter((t) => t !== NO_TEAM);
 
   const closeModal = () => {
     setModal("none");
@@ -693,28 +1331,11 @@ function Team({
     setPersonName("");
   };
 
-  const openTeamModal = () => {
-    setSuccess("");
-    setModal("team");
-  };
-
-  const openPersonModal = () => {
-    setSuccess("");
-    setPersonTeam(teamFilter !== ALL_TEAMS ? teamFilter : teamList[0] ?? "");
-    setModal("person");
-  };
-
   const addTeam = (e: React.FormEvent) => {
     e.preventDefault();
     const clean = teamName.trim().replace(/\s+/g, " ");
-    if (!clean) {
-      setError("Informe o nome do time.");
-      return;
-    }
-    if (teamList.some((t) => t.toLowerCase() === clean.toLowerCase())) {
-      setError("Já existe um time com esse nome.");
-      return;
-    }
+    if (!clean) return setError("Informe o nome do time.");
+    if (clean === NO_TEAM || teamList.some((t) => norm(t) === norm(clean))) return setError("Já existe um time com esse nome.");
     setTeams([...teams, clean]);
     setSuccess(`Time "${clean}" cadastrado com sucesso.`);
     closeModal();
@@ -729,45 +1350,29 @@ function Team({
   const addPerson = (e: React.FormEvent) => {
     e.preventDefault();
     const clean = personName.trim().replace(/\s+/g, " ");
-    if (!clean) {
-      setError("Informe o nome do colaborador.");
-      return;
-    }
-    if (!personTeam) {
-      setError("Selecione um time.");
-      return;
-    }
-    if (agents.some((a) => a.name.toLowerCase() === clean.toLowerCase())) {
-      setError("Já existe um colaborador com esse nome.");
-      return;
-    }
-    const newMember: Agent = {
-      id: Date.now(),
-      name: clean,
-      team: personTeam,
-      audits: 0,
-      score: 0,
-      trend: 0,
-      initials: clean.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase(),
-      color: PALETTE[agents.length % PALETTE.length],
-    };
-    setAgents([...agents, newMember]);
-    setSuccess(`${clean} foi cadastrado(a) em ${personTeam}.`);
+    if (!clean) return setError("Informe o nome do colaborador.");
+    const existing = people.find((p) => norm(p.name) === norm(clean));
+    assignTeam(existing ? existing.name : clean, personTeam);
+    setSuccess(
+      existing
+        ? `${existing.name} já existia; o time foi atualizado para ${personTeam}.`
+        : `${clean} foi cadastrado(a) em ${personTeam}.`
+    );
     closeModal();
   };
 
   const teamStats = teamList.map((name) => {
-    const members = agents.filter((a) => a.team === name);
+    const members = rows.filter((r) => r.team === name);
     return {
       name,
       members,
-      audits: members.reduce((sum, a) => sum + a.audits, 0),
-      avg: members.some((a) => a.audits) ? weightedScore(members) : null,
+      audits: members.reduce((sum, m) => sum + m.audits, 0),
+      score: members.some((m) => m.audits) ? weightedScore(members) : null,
     };
   });
 
-  const people = agents
-    .filter((a) => teamFilter === ALL_TEAMS || a.team === teamFilter)
+  const peopleRows = rows
+    .filter((r) => teamFilter === ALL_TEAMS || r.team === teamFilter)
     .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 
   return (
@@ -775,7 +1380,7 @@ function Team({
       <Tabs
         tabs={[
           { id: "teams", label: `Times (${teamList.length})` },
-          { id: "people", label: `Colaboradores (${agents.length})` },
+          { id: "people", label: `Colaboradores (${people.length})` },
         ]}
         value={view}
         onChange={(v) => {
@@ -786,27 +1391,34 @@ function Team({
 
       {success && <div className="notice success" style={{ marginTop: 0, marginBottom: 16 }}>{success}</div>}
 
-      {/* ---------- DASH DE TIMES ---------- */}
       {view === "teams" && (
         <>
           <section className="kpis">
             <article className="kpi-card">
               <div className="kpi-header"><small>TIMES ATIVOS</small></div>
-              <div className="kpi-body"><strong>{teamList.length}</strong></div>
+              <div className="kpi-body"><strong>{realTeams.length}</strong></div>
             </article>
             <article className="kpi-card">
               <div className="kpi-header"><small>COLABORADORES</small></div>
-              <div className="kpi-body"><strong>{agents.length}</strong></div>
+              <div className="kpi-body"><strong>{people.length}</strong></div>
             </article>
             <article className="kpi-card">
               <div className="kpi-header"><small>NOTA MÉDIA GERAL</small></div>
-              <div className="kpi-body"><strong>{fmt(weightedScore(agents))}</strong><span>/ 100</span></div>
+              <div className="kpi-body"><strong>{fmt(weightedScore(rows))}</strong><span>/ 100</span></div>
             </article>
           </section>
 
           <div className="page-actions" style={{ marginBottom: 16 }}>
             <h3>Times</h3>
-            <button className="primary-button" onClick={openTeamModal}>+ Cadastrar novo time</button>
+            <button
+              className="primary-button"
+              onClick={() => {
+                setSuccess("");
+                setModal("team");
+              }}
+            >
+              + Cadastrar novo time
+            </button>
           </div>
 
           {teamStats.length === 0 ? (
@@ -825,9 +1437,14 @@ function Team({
                     ))}
                     {t.members.length === 0 && <span className="muted" style={{ fontSize: 13 }}>Sem colaboradores ainda</span>}
                   </div>
+                  {t.name === NO_TEAM && (
+                    <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                      Consultores da planilha ainda sem time. Atribua um time na aba Colaboradores.
+                    </p>
+                  )}
                   <div className="team-metrics">
-                    <div><small>AUDITORIAS</small><strong>{t.audits}</strong></div>
-                    <div><small>NOTA MÉDIA</small><strong>{t.avg === null ? "—" : fmt(t.avg)}</strong></div>
+                    <div><small>MONITORIAS</small><strong>{t.audits}</strong></div>
+                    <div><small>NOTA MÉDIA</small><strong>{t.score === null ? "—" : fmt(t.score)}</strong></div>
                   </div>
                   <div className="team-actions">
                     <button
@@ -841,6 +1458,7 @@ function Team({
                       Ver colaboradores
                     </button>
                     {t.members.length === 0 &&
+                      t.name !== NO_TEAM &&
                       (confirmDelete === t.name ? (
                         <button className="danger-button" onClick={() => deleteTeam(t.name)}>Confirmar</button>
                       ) : (
@@ -854,53 +1472,66 @@ function Team({
         </>
       )}
 
-      {/* ---------- DASH DE COLABORADORES ---------- */}
       {view === "people" && (
         <>
           <div className="page-actions" style={{ marginBottom: 16 }}>
             <Dropdown label="TIME" value={teamFilter} options={[ALL_TEAMS, ...teamList]} onChange={setTeamFilter} />
-            <button className="primary-button" onClick={openPersonModal}>+ Cadastrar novo colaborador</button>
+            <button
+              className="primary-button"
+              onClick={() => {
+                setSuccess("");
+                setPersonTeam(teamFilter !== ALL_TEAMS ? teamFilter : realTeams[0] ?? NO_TEAM);
+                setModal("person");
+              }}
+            >
+              + Cadastrar novo colaborador
+            </button>
           </div>
 
           <div className="panel">
-            {people.length === 0 ? (
+            {peopleRows.length === 0 ? (
               <p className="empty">Nenhum colaborador neste filtro.</p>
             ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>COLABORADOR</th>
-                    <th>TIME</th>
-                    <th>AUDITORIAS</th>
-                    <th>NOTA MÉDIA</th>
-                    <th>EVOLUÇÃO</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {people.map((a) => (
-                    <tr key={a.id} onClick={() => openAudit(a)} style={{ cursor: "pointer" }}>
-                      <td>
-                        <div className="agent">
-                          <span className="avatar" style={{ background: a.color }}>{a.initials}</span>
-                          <strong>{a.name}</strong>
-                        </div>
-                      </td>
-                      <td>{a.team}</td>
-                      <td>{a.audits}</td>
-                      <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 100</> : "—"}</td>
-                      <td>
-                        {a.audits ? <span className={a.trend >= 0 ? "positive" : "negative"}>{fmtTrend(a.trend)}</span> : "—"}
-                      </td>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>COLABORADOR</th>
+                      <th>TIME</th>
+                      <th>MONITORIAS</th>
+                      <th>NOTA MÉDIA</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {peopleRows.map((a) => (
+                      <tr key={a.id} onClick={() => openAudit(a)} style={{ cursor: "pointer" }}>
+                        <td>
+                          <div className="agent">
+                            <span className="avatar" style={{ background: a.color }}>{a.initials}</span>
+                            <strong>{a.name}</strong>
+                          </div>
+                        </td>
+                        <td onClick={(e) => e.stopPropagation()}>
+                          <select
+                            className="input inline-select"
+                            value={a.team}
+                            onChange={(e) => assignTeam(a.name, e.target.value)}
+                          >
+                            {[NO_TEAM, ...realTeams].map((t) => <option key={t}>{t}</option>)}
+                          </select>
+                        </td>
+                        <td>{a.audits}</td>
+                        <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 100</> : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         </>
       )}
 
-      {/* ---------- Painel: novo time ---------- */}
       {modal === "team" && (
         <div className="drawer-overlay" onClick={closeModal}>
           <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
@@ -930,45 +1561,39 @@ function Team({
         </div>
       )}
 
-      {/* ---------- Painel: novo colaborador ---------- */}
       {modal === "person" && (
         <div className="drawer-overlay" onClick={closeModal}>
           <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
             <h3>Cadastrar novo colaborador</h3>
-            <p className="muted" style={{ fontSize: 13 }}>Informe o nome e o time do novo membro.</p>
-            {teamList.length === 0 ? (
-              <>
-                <div className="notice" style={{ marginTop: 20 }}>Cadastre ao menos um time antes de adicionar colaboradores.</div>
-                <button className="secondary-button" style={{ marginTop: 14 }} onClick={closeModal}>Fechar</button>
-              </>
-            ) : (
-              <form onSubmit={addPerson} style={{ marginTop: 20, display: "grid", gap: 14 }}>
-                <div>
-                  <label className="field-label">NOME COMPLETO</label>
-                  <input
-                    className="input"
-                    autoFocus
-                    value={personName}
-                    onChange={(e) => {
-                      setPersonName(e.target.value);
-                      setError("");
-                    }}
-                    placeholder="Ex: Juliana Souza"
-                  />
-                </div>
-                <div>
-                  <label className="field-label">TIME</label>
-                  <select className="input" value={personTeam} onChange={(e) => setPersonTeam(e.target.value)}>
-                    {teamList.map((t) => <option key={t}>{t}</option>)}
-                  </select>
-                </div>
-                {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
-                <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-                  <button type="button" className="secondary-button" style={{ flex: 1 }} onClick={closeModal}>Cancelar</button>
-                  <button type="submit" className="primary-button" style={{ flex: 1 }}>Salvar</button>
-                </div>
-              </form>
-            )}
+            <p className="muted" style={{ fontSize: 13 }}>
+              Informe o nome e o time. Se o nome for igual ao da planilha, as monitorias dele aparecem automaticamente.
+            </p>
+            <form onSubmit={addPerson} style={{ marginTop: 20, display: "grid", gap: 14 }}>
+              <div>
+                <label className="field-label">NOME COMPLETO</label>
+                <input
+                  className="input"
+                  autoFocus
+                  value={personName}
+                  onChange={(e) => {
+                    setPersonName(e.target.value);
+                    setError("");
+                  }}
+                  placeholder="Ex: Juliana Souza"
+                />
+              </div>
+              <div>
+                <label className="field-label">TIME</label>
+                <select className="input" value={personTeam} onChange={(e) => setPersonTeam(e.target.value)}>
+                  {[NO_TEAM, ...realTeams].map((t) => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+              {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
+              <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+                <button type="button" className="secondary-button" style={{ flex: 1 }} onClick={closeModal}>Cancelar</button>
+                <button type="submit" className="primary-button" style={{ flex: 1 }}>Salvar</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -976,79 +1601,186 @@ function Team({
   );
 }
 
-/* ============================== Relatórios ============================== */
+/* =====================================================================
+   RELATÓRIOS
+   ===================================================================== */
 
-function Reports({ agents, teamList, config }: { agents: Agent[]; teamList: string[]; config: Config }) {
-  const totalAudits = agents.reduce((sum, a) => sum + a.audits, 0);
-  const avg = weightedScore(agents);
-  const below = agents.filter((a) => a.audits > 0 && a.score < config.minScore).length;
+function Reports({
+  people,
+  records,
+  teamList,
+  config,
+}: {
+  people: Person[];
+  records: Monitoria[];
+  teamList: string[];
+  config: Config;
+}) {
+  const [period, setPeriod] = useState("Todo o período");
+  const days = PERIODS[period];
+  const now = Date.now();
+
+  const list = records.filter((r) => days === null || r.date === null || r.date >= now - days * DAY);
+  const rows = computeRows(people, records, days, now);
+
+  const resolved = rateOf(list, "resolvida", isYes);
+  const csat = rateOf(list, "csat", isResponded);
+  const below = list.length ? (list.filter((r) => r.nota < config.minScore).length / list.length) * 100 : 0;
+
+  const byCategory = new Map<string, Monitoria[]>();
+  list.forEach((r) => {
+    const key = r.categoria || "Sem categoria";
+    const arr = byCategory.get(key);
+    if (arr) arr.push(r);
+    else byCategory.set(key, [r]);
+  });
+  const categoryRows = Array.from(byCategory.entries())
+    .map(([name, items]) => ({
+      name,
+      count: items.length,
+      score: avg(items.map((i) => i.nota)),
+      resolved: rateOf(items, "resolvida", isYes),
+    }))
+    .sort((a, b) => b.count - a.count);
 
   return (
     <main className="content">
-      <div className="panel">
-        <h3>Relatórios Analíticos e Exportação</h3>
-        <p className="muted">Consolidado de conformidade e auditorias da operação (últimos 30 dias).</p>
-        <div className="kpis" style={{ marginTop: 20 }}>
-          <div className="kpi-card">
-            <small>NOTA MÉDIA GERAL</small>
-            <div className="kpi-body"><strong>{fmt(avg)}</strong><span>/ 100</span></div>
-          </div>
-          <div className="kpi-card">
-            <small>AUDITORIAS CONCLUÍDAS</small>
-            <div className="kpi-body"><strong>{totalAudits.toLocaleString("pt-BR")}</strong></div>
-          </div>
-          <div className="kpi-card">
-            <small>ABAIXO DA NOTA MÍNIMA</small>
-            <div className="kpi-body"><strong>{below}</strong><span>colaboradores</span></div>
-          </div>
-        </div>
+      <div className="page-actions" style={{ marginBottom: 16 }}>
+        <Dropdown label="PERÍODO" value={period} options={Object.keys(PERIODS)} onChange={setPeriod} />
+      </div>
 
-        <table>
-          <thead>
-            <tr>
-              <th>TIME</th>
-              <th>COLABORADORES</th>
-              <th>AUDITORIAS</th>
-              <th>NOTA MÉDIA</th>
-            </tr>
-          </thead>
-          <tbody>
-            {teamList.map((t) => {
-              const members = agents.filter((a) => a.team === t);
-              return (
-                <tr key={t}>
-                  <td><strong>{t}</strong></td>
-                  <td>{members.length}</td>
-                  <td>{members.reduce((sum, a) => sum + a.audits, 0)}</td>
-                  <td>{members.some((a) => a.audits) ? fmt(weightedScore(members)) : "—"}</td>
+      <section className="kpis" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
+        <article className="kpi-card">
+          <div className="kpi-header"><small>NOTA MÉDIA</small></div>
+          <div className="kpi-body"><strong>{fmt(avg(list.map((r) => r.nota)))}</strong><span>/ 100</span></div>
+          <p>{list.length.toLocaleString("pt-BR")} monitorias</p>
+        </article>
+        <article className="kpi-card">
+          <div className="kpi-header"><small>ABAIXO DA NOTA MÍNIMA</small></div>
+          <div className="kpi-body"><strong>{fmt(below)}%</strong></div>
+          <p>nota mínima: {config.minScore}</p>
+        </article>
+        <article className="kpi-card">
+          <div className="kpi-header"><small>TAXA DE RESOLUÇÃO</small></div>
+          <div className="kpi-body"><strong>{resolved === null ? "—" : `${fmt(resolved)}%`}</strong></div>
+          <p>coluna “Resolvida?”</p>
+        </article>
+        <article className="kpi-card">
+          <div className="kpi-header"><small>CSAT RESPONDIDO</small></div>
+          <div className="kpi-body"><strong>{csat === null ? "—" : `${fmt(csat)}%`}</strong></div>
+          <p>coluna “Status CSAT”</p>
+        </article>
+      </section>
+
+      <div className="panel">
+        <h3>Por time</h3>
+        <div className="table-wrap" style={{ marginTop: 12 }}>
+          <table>
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>COLABORADORES</th>
+                <th>MONITORIAS</th>
+                <th>NOTA MÉDIA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {teamList.map((t) => {
+                const members = rows.filter((r) => r.team === t);
+                return (
+                  <tr key={t}>
+                    <td><strong>{t}</strong></td>
+                    <td>{members.length}</td>
+                    <td>{members.reduce((sum, a) => sum + a.audits, 0)}</td>
+                    <td>{members.some((a) => a.audits) ? fmt(weightedScore(members)) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 20 }}>
+        <h3>Por categoria</h3>
+        {categoryRows.length === 0 ? (
+          <p className="empty">Sem monitorias no período.</p>
+        ) : (
+          <div className="table-wrap" style={{ marginTop: 12 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>CATEGORIA</th>
+                  <th>MONITORIAS</th>
+                  <th>NOTA MÉDIA</th>
+                  <th>RESOLVIDAS</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {categoryRows.map((c) => (
+                  <tr key={c.name}>
+                    <td><strong>{c.name}</strong></td>
+                    <td>{c.count}</td>
+                    <td>{fmt(c.score)}</td>
+                    <td>{c.resolved === null ? "—" : `${fmt(c.resolved)}%`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </main>
   );
 }
 
-/* ============================== Configurações ============================== */
+/* =====================================================================
+   CONFIGURAÇÕES
+   ===================================================================== */
 
 function Settings({
   config,
   setConfig,
   setBlocks,
+  sheet,
+  reload,
+  sheetUrlSetting,
+  setSheetUrlSetting,
 }: {
   config: Config;
   setConfig: (config: Config) => void;
   setBlocks: (blocks: Block[]) => void;
+  sheet: SheetState;
+  reload: () => void;
+  sheetUrlSetting: string;
+  setSheetUrlSetting: (url: string) => void;
 }) {
   const profileNames = Object.keys(MARKET_PROFILES);
   const [selected, setSelected] = useState(profileNames.includes(config.profile) ? config.profile : profileNames[0]);
   const [minScore, setMinScore] = useState(String(config.minScore));
   const [targetAudits, setTargetAudits] = useState(String(config.targetAudits));
   const [message, setMessage] = useState("");
+  const [urlInput, setUrlInput] = useState(sheetUrlSetting);
+  const [urlError, setUrlError] = useState("");
 
   const profile = MARKET_PROFILES[selected];
+
+  const connect = () => {
+    const value = urlInput.trim();
+    if (value && !/^https:\/\/docs\.google\.com\/spreadsheets\//.test(value)) {
+      setUrlError("Cole um link do Google Sheets (começa com https://docs.google.com/spreadsheets/...).");
+      return;
+    }
+    setUrlError("");
+    if (value === sheetUrlSetting) reload();
+    else setSheetUrlSetting(value);
+  };
+
+  const disconnect = () => {
+    setUrlInput("");
+    setUrlError("");
+    setSheetUrlSetting("");
+  };
 
   const applyProfile = () => {
     setBlocks(profile.blocks.map((b, i) => ({ ...b, id: Date.now() + i })));
@@ -1073,9 +1805,92 @@ function Settings({
     setMessage("Configurações salvas com sucesso!");
   };
 
+  const statusLabel =
+    sheet.status === "ok"
+      ? "Conectada"
+      : sheet.status === "loading"
+      ? "Carregando…"
+      : sheet.status === "error"
+      ? "Com erro"
+      : "Não conectada (modo demonstração)";
+
   return (
     <main className="content">
       <div className="panel">
+        <div className="page-actions">
+          <div>
+            <h3>Fonte de dados (Google Sheets)</h3>
+            <p className="muted">A planilha é a base da ferramenta: Dashboard, Monitorias, Equipe e Relatórios leem dela.</p>
+          </div>
+          <div className={`badge ${sheet.status === "ok" ? "ok" : "warn"}`}>{statusLabel}</div>
+        </div>
+
+        <div className="inline-form" style={{ marginTop: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label className="field-label">LINK DA PLANILHA (CSV publicado ou link de compartilhamento)</label>
+            <input
+              className="input"
+              value={urlInput}
+              onChange={(e) => {
+                setUrlInput(e.target.value);
+                setUrlError("");
+              }}
+              placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv"
+            />
+          </div>
+          <button className="primary-button" onClick={connect}>Salvar e conectar</button>
+          {sheetUrlSetting && <button className="secondary-button" onClick={disconnect}>Desconectar</button>}
+        </div>
+        {urlError && <p className="negative" style={{ margin: "10px 0 0" }}>{urlError}</p>}
+        {ENV_URL && !sheetUrlSetting && (
+          <p className="muted" style={{ fontSize: 12 }}>Usando o link padrão configurado no Vercel (VITE_SHEET_CSV_URL).</p>
+        )}
+        {sheet.status === "error" && <div className="notice">{sheet.message}</div>}
+
+        <div className="rule-block" style={{ marginTop: 16 }}>
+          <strong>Como conectar</strong>
+          <ol className="steps">
+            <li>Na planilha: <b>Arquivo → Compartilhar → Publicar na web</b>.</li>
+            <li>Escolha a <b>aba</b> com as monitorias e o formato <b>Valores separados por vírgula (.csv)</b>, e clique em <b>Publicar</b>.</li>
+            <li>Copie o link gerado e cole no campo acima. Para valer para todos os usuários, cadastre o mesmo link no Vercel como <b>VITE_SHEET_CSV_URL</b> e faça um novo deploy.</li>
+          </ol>
+          <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+            Atenção: quem tiver o link consegue ler os dados da aba publicada. Não publique nada que não possa ser visto por terceiros.
+          </p>
+        </div>
+
+        {sheet.status === "ok" && (
+          <div style={{ marginTop: 16 }}>
+            <div className="editor-title">COLUNAS RECONHECIDAS</div>
+            <div className="table-wrap" style={{ marginTop: 8 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>CAMPO DA FERRAMENTA</th>
+                    <th>COLUNA NA PLANILHA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sheet.mapping.map((m) => (
+                    <tr key={m.field}>
+                      <td>{m.label}</td>
+                      <td>
+                        {m.header ? (
+                          <span className="positive">{m.header}</span>
+                        ) : (
+                          <span className="muted-text">não encontrada</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="panel" style={{ marginTop: 20 }}>
         <div className="page-actions">
           <div>
             <h3>Perfil padrão de mercado</h3>
@@ -1118,12 +1933,12 @@ function Settings({
           <div className="rule-block">
             <strong>Nota mínima</strong>
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
-              Consultores abaixo desta nota são contados como desvio no Dashboard e nos Relatórios.
+              Monitorias abaixo desta nota contam como desvio no Dashboard e nos Relatórios.
             </p>
             <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={minScore} onChange={(e) => setMinScore(e.target.value)} />
           </div>
           <div className="rule-block">
-            <strong>Meta mensal de auditorias por consultor</strong>
+            <strong>Meta mensal de monitorias por consultor</strong>
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
               Volume necessário para garantir a representatividade estatística da operação.
             </p>
@@ -1137,47 +1952,109 @@ function Settings({
   );
 }
 
-/* ============================== Auditoria (drawer) ============================== */
+/* =====================================================================
+   DETALHE (drawer)
+   ===================================================================== */
 
-function AuditDrawer({ agent, close }: { agent: Agent | null; close: () => void }) {
+function AuditDrawer({
+  person,
+  records,
+  config,
+  close,
+}: {
+  person: Person | null;
+  records: Monitoria[];
+  config: Config;
+  close: () => void;
+}) {
+  const list = records
+    .filter((r) => !person || norm(r.consultor) === norm(person.name))
+    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0))
+    .slice(0, 10);
+
   return (
     <div className="drawer-overlay" onClick={close}>
-      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 500, display: "flex", flexDirection: "column", padding: 0 }}>
+      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 520, display: "flex", flexDirection: "column", padding: 0 }}>
         <div className="drawer-header" style={{ padding: 20, borderBottom: "1px solid var(--line)", marginBottom: 0 }}>
-          <h3>Detalhes da Auditoria e Checklist</h3>
+          <h3>{person ? person.name : "Últimas monitorias"}</h3>
           <button onClick={close} className="secondary-button">Fechar</button>
         </div>
         <div className="drawer-body" style={{ padding: 20, overflowY: "auto", flex: 1 }}>
-          <p className="muted" style={{ fontSize: 13 }}>
-            Visualização do atendimento, histórico e recálculo de notas em tempo real.
+          <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+            {person ? `${person.team} · ` : ""}as 10 monitorias mais recentes
           </p>
-          <div className="rule-block" style={{ lineHeight: 1.8 }}>
-            <strong>Cliente:</strong> João Silva<br />
-            <strong>Atendente:</strong> {agent ? agent.name : "Marina Costa"}<br />
-            <strong>Nota atual:</strong> {agent ? (agent.audits ? fmt(agent.score) : "—") : "96,8"} / 100
-          </div>
+          {list.length === 0 ? (
+            <p className="empty">Nenhuma monitoria registrada.</p>
+          ) : (
+            <div className="block-items">
+              {list.map((r) => (
+                <div key={r.id} className="rule-block" style={{ lineHeight: 1.7 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                    <strong>{person ? r.categoria || "Sem categoria" : r.consultor}</strong>
+                    <strong className={r.nota < config.minScore ? "negative" : "positive"}>{fmt(r.nota)}</strong>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, margin: 0 }}>
+                    {[r.week, r.ticket && `#${r.ticket}`, r.resolvida && `Resolvida: ${r.resolvida}`, r.csat].filter(Boolean).join(" · ")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-/* ============================== App ============================== */
+/* =====================================================================
+   APP
+   ===================================================================== */
 
 export default function App() {
   const [page, setPage] = useState("dashboard");
   const [auditOpen, setAuditOpen] = useState(false);
-  const [auditAgent, setAuditAgent] = useState<Agent | null>(null);
+  const [auditPerson, setAuditPerson] = useState<Person | null>(null);
 
-  const [agents, setAgents] = usePersistentState<Agent[]>("qualita:v1:agents", INITIAL_AGENTS);
-  const [teams, setTeams] = usePersistentState<string[]>("qualita:v1:teams", DEFAULT_TEAMS);
+  const [registered, setRegistered] = usePersistentState<Person[]>("qualita:v2:people", []);
+  const [teams, setTeams] = usePersistentState<string[]>("qualita:v2:teams", []);
   const [blocks, setBlocks] = usePersistentState<Block[]>("qualita:v1:blocks", DEFAULT_BLOCKS);
   const [config, setConfig] = usePersistentState<Config>("qualita:v1:config", DEFAULT_CONFIG);
+  const [sheetUrlSetting, setSheetUrlSetting] = usePersistentState<string>("qualita:v2:sheetUrl", "");
 
-  const teamList = unionTeams(teams, agents);
+  const sheetUrl = resolveSheetUrl(sheetUrlSetting || ENV_URL);
+  const [sheet, reload] = useSheet(sheetUrl);
+  const isDemo = sheet.status === "demo";
+  const records = sheet.records;
 
-  const openAudit = (agent?: Agent) => {
-    setAuditAgent(agent ?? null);
+  const people = useMemo(
+    () => buildPeople(isDemo ? [...DEMO_PEOPLE, ...registered] : registered, records),
+    [isDemo, registered, records]
+  );
+  const teamList = useMemo(
+    () => buildTeamList(isDemo ? [...DEMO_TEAMS, ...teams] : teams, people),
+    [isDemo, teams, people]
+  );
+
+  /* Define o time de uma pessoa (cria o cadastro se ela só existir na planilha) */
+  const assignTeam = (name: string, team: string) => {
+    const key = norm(name);
+    const exists = registered.some((p) => norm(p.name) === key);
+    if (exists) {
+      setRegistered(registered.map((p) => (norm(p.name) === key ? { ...p, team } : p)));
+    } else {
+      const person: Person = {
+        id: Date.now(),
+        name,
+        team,
+        initials: initialsOf(name),
+        color: PALETTE[people.length % PALETTE.length],
+      };
+      setRegistered([...registered, person]);
+    }
+  };
+
+  const openAudit = (person?: Person) => {
+    setAuditPerson(person ?? null);
     setAuditOpen(true);
   };
 
@@ -1186,15 +2063,37 @@ export default function App() {
       <Sidebar page={page} setPage={setPage} />
       <div className="workspace">
         <Header page={page} />
-        {page === "dashboard" && <Dashboard agents={agents} teamList={teamList} config={config} openAudit={openAudit} />}
+        {page !== "settings" && <SourceBanner sheet={sheet} reload={reload} goSettings={() => setPage("settings")} />}
+        {page === "dashboard" && (
+          <Dashboard people={people} records={records} teamList={teamList} config={config} openAudit={openAudit} />
+        )}
+        {page === "monitorias" && <Monitorias records={records} config={config} />}
         {page === "parameters" && <Parameters blocks={blocks} setBlocks={setBlocks} config={config} />}
         {page === "team" && (
-          <Team agents={agents} setAgents={setAgents} teams={teams} setTeams={setTeams} openAudit={openAudit} />
+          <Team
+            people={people}
+            records={records}
+            teams={teams}
+            teamList={teamList}
+            setTeams={setTeams}
+            assignTeam={assignTeam}
+            openAudit={openAudit}
+          />
         )}
-        {page === "reports" && <Reports agents={agents} teamList={teamList} config={config} />}
-        {page === "settings" && <Settings config={config} setConfig={setConfig} setBlocks={setBlocks} />}
+        {page === "reports" && <Reports people={people} records={records} teamList={teamList} config={config} />}
+        {page === "settings" && (
+          <Settings
+            config={config}
+            setConfig={setConfig}
+            setBlocks={setBlocks}
+            sheet={sheet}
+            reload={reload}
+            sheetUrlSetting={sheetUrlSetting}
+            setSheetUrlSetting={setSheetUrlSetting}
+          />
+        )}
       </div>
-      {auditOpen && <AuditDrawer agent={auditAgent} close={() => setAuditOpen(false)} />}
+      {auditOpen && <AuditDrawer person={auditPerson} records={records} config={config} close={() => setAuditOpen(false)} />}
     </div>
   );
 }
