@@ -4,26 +4,51 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
    TIPOS
    ===================================================================== */
 
+type Concept = "Excelente" | "Adequado" | "Atenção" | "Crítico";
+
 type Person = { id: number; name: string; team: string; initials: string; color: string };
 
 type Monitoria = {
   id: string;
-  date: number | null; // timestamp (início do dia) ou null se a planilha não tiver data
+  date: number | null; // início do dia, ou null se a planilha não tiver data
   week: string;
   consultor: string;
   categoria: string;
   ticket: string;
   csat: string;
-  resolvida: string;
-  nota: number; // sempre na escala 0 a 100
-  team: string; // vem da planilha, se existir coluna de time
+  team: string;
+  scores: (number | null)[] | null; // 5 parâmetros: 0, 1, 2 ou null ("-"); null se a planilha não tiver as colunas
+  nota: number | null; // total de 0 a 10; null = Desconsiderado
+  concept: Concept | null;
+  flag: boolean; // alerta de prioridade possivelmente rebaixada
+  disregarded: boolean;
+  attention: string;
 };
+
+type Scored = Monitoria & { nota: number };
 
 type AgentRow = Person & { audits: number; score: number; trend: number | null };
 
-type Block = { id: number; name: string; weight: number; desc: string };
+type Param = {
+  id: number;
+  name: string;
+  evaluates: string;
+  full: string;
+  partial: string;
+  none: string;
+  canBeNA: boolean;
+  rule: string;
+};
 
-type Config = { profile: string; minScore: number; targetAudits: number };
+type Scorecard = {
+  version: string;
+  params: Param[];
+  excellentMin: number;
+  adequateMin: number;
+  attentionMin: number;
+};
+
+type Goals = { csat: number; agreement: number; feedback: number };
 
 type FieldMapping = { field: string; label: string; header: string | null };
 
@@ -37,8 +62,10 @@ type SheetState = {
   mapping: FieldMapping[];
 };
 
+type Win = { from: number; to: number; prevFrom: number; prevTo: number; hasPrev: boolean };
+
 /* =====================================================================
-   CONSTANTES
+   CONSTANTES (baseadas no Processo de Monitoria de Qualidade V4)
    ===================================================================== */
 
 const DAY = 86400000;
@@ -48,71 +75,113 @@ const ALL_CONSULTANTS = "Todos os consultores";
 
 const PALETTE = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1", "#4fa3a5", "#d9776a"];
 
-const PERIODS: Record<string, number | null> = {
+const CONCEPTS: Concept[] = ["Excelente", "Adequado", "Atenção", "Crítico"];
+
+const CONCEPT_COLORS: Record<Concept, string> = {
+  Excelente: "#62c9b5",
+  Adequado: "#5ea3e0",
+  Atenção: "#e5a45c",
+  Crítico: "#ef8d85",
+};
+
+const CONCEPT_READING: Record<Concept, string> = {
+  Excelente: "Atende plenamente em praticamente todos os parâmetros.",
+  Adequado: "Atende, com pequenas lacunas pontuais.",
+  Atenção: "Lacunas relevantes; pede acompanhamento.",
+  Crítico:
+    "Não atende na maior parte, ou teve prioridade rebaixada indevidamente em caso de folha; entra nos alertas da liderança.",
+};
+
+const PERIOD_NAMES = [
+  "Semana anterior",
+  "Últimos 7 dias",
+  "Últimos 15 dias",
+  "Últimos 30 dias",
+  "Últimos 90 dias",
+  "Todo o período",
+];
+
+const PERIOD_DAYS: Record<string, number> = {
   "Últimos 7 dias": 7,
   "Últimos 15 dias": 15,
   "Últimos 30 dias": 30,
   "Últimos 90 dias": 90,
-  "Todo o período": null,
 };
 
-/* Link da planilha definido no Vercel (Settings > Environment Variables > VITE_SHEET_CSV_URL) */
+/* Link da planilha definido na Vercel (Settings > Environment Variables > VITE_SHEET_CSV_URL) */
 const ENV_URL: string = (((import.meta as any).env?.VITE_SHEET_CSV_URL as string | undefined) ?? "").trim();
 
-const DEFAULT_BLOCKS: Block[] = [
-  { id: 1, name: "Empatia e Conexão com o Cliente", weight: 35, desc: "Avalia clareza, tom de voz e escuta ativa." },
-  { id: 2, name: "Resolução Técnica e Processual", weight: 40, desc: "Verifica acurácia das informações e uso correto dos sistemas." },
-  { id: 3, name: "Protocolo e Compliance (LGPD)", weight: 25, desc: "Checa cumprimento de normas de segurança e sigilo." },
-];
+const DEFAULT_GOALS: Goals = { csat: 94, agreement: 90, feedback: 100 };
 
-const DEFAULT_CONFIG: Config = { profile: "Atendimento / SAC", minScore: 85, targetAudits: 12 };
-
-/* Perfis de exemplo. Ajuste os valores conforme a realidade da sua operação. */
-const MARKET_PROFILES: Record<
-  string,
-  { description: string; minScore: number; targetAudits: number; blocks: Omit<Block, "id">[] }
-> = {
-  "Atendimento / SAC": {
-    description: "Foco em empatia, resolução no primeiro contato e conformidade.",
-    minScore: 85,
-    targetAudits: 12,
-    blocks: [
-      { name: "Empatia e Conexão com o Cliente", weight: 35, desc: "Avalia clareza, tom de voz e escuta ativa." },
-      { name: "Resolução Técnica e Processual", weight: 40, desc: "Verifica acurácia das informações e uso dos sistemas." },
-      { name: "Protocolo e Compliance (LGPD)", weight: 25, desc: "Checa cumprimento de normas de segurança e sigilo." },
-    ],
-  },
-  "Vendas e Relacionamento": {
-    description: "Foco em abordagem, negociação e acompanhamento do cliente.",
-    minScore: 80,
-    targetAudits: 10,
-    blocks: [
-      { name: "Abordagem e Diagnóstico", weight: 30, desc: "Qualidade das perguntas e entendimento da necessidade." },
-      { name: "Negociação e Argumentação", weight: 40, desc: "Apresentação de valor e contorno de objeções." },
-      { name: "Fechamento e Follow-up", weight: 30, desc: "Condução ao fechamento e próximos passos combinados." },
-    ],
-  },
-  "Cobrança e Recuperação": {
-    description: "Foco em conformidade legal, negociação e comunicação respeitosa.",
-    minScore: 88,
-    targetAudits: 15,
-    blocks: [
-      { name: "Conformidade Legal e Regulatória", weight: 45, desc: "Cumprimento de normas de cobrança e LGPD." },
-      { name: "Negociação e Acordo", weight: 35, desc: "Proposta adequada e registro correto do acordo." },
-      { name: "Comunicação e Postura", weight: 20, desc: "Tom respeitoso e clareza das informações." },
-    ],
-  },
-  "Suporte Técnico": {
-    description: "Foco em diagnóstico, aderência ao processo e comunicação técnica.",
-    minScore: 85,
-    targetAudits: 12,
-    blocks: [
-      { name: "Diagnóstico e Solução", weight: 45, desc: "Identificação correta da causa e solução aplicada." },
-      { name: "Aderência ao Processo", weight: 30, desc: "Registro, escalonamento e uso da base de conhecimento." },
-      { name: "Comunicação Técnica", weight: 25, desc: "Clareza das orientações passadas ao cliente." },
-    ],
-  },
+const DEFAULT_SCORECARD: Scorecard = {
+  version: "V4 (piloto, 05/11/2026)",
+  excellentMin: 9,
+  adequateMin: 7,
+  attentionMin: 5,
+  params: [
+    {
+      id: 1,
+      name: "Classificação e triagem",
+      evaluates:
+        "Categoria, causa, solução e menu/funcionalidade corretos; justificativa técnica se a prioridade/FLAG foi alterada.",
+      full: "Todos corretos e prioridade/FLAG justificada.",
+      partial: "Um campo incorreto ou incompleto, sem impacto na priorização.",
+      none: "Classificação errada, prioridade/FLAG alterada sem justificativa, ou ausente.",
+      canBeNA: false,
+      rule: "A causa deve ser a causa técnica do problema, e não o motivo do encerramento. A solução registrada deve refletir o que foi de fato entregue: paliativo não equivale a correção implementada.",
+    },
+    {
+      id: 2,
+      name: "Condução ativa",
+      evaluates:
+        "Iniciativa do consultor e atualizações periódicas de status em casos pendentes de N2 ou áreas internas.",
+      full: "Proativo, com atualizações periódicas; cliente nunca precisou cobrar.",
+      partial: "Condução razoável, com lacunas no status intermediário.",
+      none: "Cliente teve que cobrar retorno ou ficou sem atualização.",
+      canBeNA: true,
+      rule: "Quando o atendimento é resolvido na primeira resposta, este parâmetro não se aplica (“-”) e a nota é calculada de forma proporcional.",
+    },
+    {
+      id: 3,
+      name: "Comunicação e prazos",
+      evaluates: "Mensagens objetivas e profissionais, com prazo alinhado para próximos passos.",
+      full: "Clara, adequada e com prazo ou horizonte alinhado.",
+      partial: "Aceitável, mas com respostas genéricas.",
+      none: "Confusa, inadequada ou sem previsão de retorno.",
+      canBeNA: true,
+      rule: "Resolvido na primeira resposta: não se aplica (“-”). Mensagens duplicadas ou coladas sem contexto reduzem a nota, por falta de profissionalismo.",
+    },
+    {
+      id: 4,
+      name: "Conclusão validada",
+      evaluates: "Solicitação resolvida e próximo passo consolidado.",
+      full: "Desfecho validado pelo cliente, solução evidenciada e próximo passo claro.",
+      partial: "Há direcionamento para o encerramento, mas sem validação explícita.",
+      none: "Encerrado de forma sumária, sem validação ou com resposta aberta.",
+      canBeNA: false,
+      rule: "Encerrar por vinculação a outro ticket, ou por “o cliente resolveu sozinho”, sem mensagem de confirmação e sem registro do que foi feito, não atinge a nota 2.",
+    },
+    {
+      id: 5,
+      name: "Registro interno",
+      evaluates: "Observação interna com o que causou o problema e como foi resolvido.",
+      full: "Causa e solução registradas de forma clara e estruturada.",
+      partial: "Registro incompleto (só causa ou só solução, ou conteúdo genérico).",
+      none: "Sem registro interno.",
+      canBeNA: false,
+      rule: "Registros corretos no ato da finalização do ticket, com a observação interna.",
+    },
+  ],
 };
+
+const GENERAL_RULES = [
+  "A nota de cada parâmetro é inteira (0, 1 ou 2), sem meios-pontos, ou “-” quando o parâmetro não se aplica (somente parâmetros 2 e 3).",
+  "O conceito final é sempre calculado a partir do total, nunca por impressão geral. Única exceção: prioridade/FLAG rebaixada indevidamente em caso com impacto em folha de pagamento leva o ticket direto para Crítico.",
+  "Ticket tratado integralmente por bot, ou sem atendimento humano, não é pontuado: registrar “Desconsiderado” com uma frase de explicação.",
+  "Se faltar algum dado de classificação, avaliar o parâmetro 1 pelo que o ticket mostra e declarar o que não pôde ser validado.",
+  "CSAT recebido depois da avaliação é associado ao ticket, sem reavaliação.",
+  "A avaliação usa somente evidências do ticket, sem presumir informações.",
+];
 
 /* =====================================================================
    UTILITÁRIOS
@@ -149,11 +218,18 @@ function hashStr(s: string) {
   return Math.abs(h);
 }
 
+const mondayOf = (t: number) => startOfDay(t) - ((new Date(t).getDay() + 6) % 7) * DAY;
+
 function weekLabel(date: number) {
-  const d = new Date(date);
-  const monday = date - ((d.getDay() + 6) % 7) * DAY;
+  const monday = mondayOf(date);
   const short = (t: number) => new Date(t).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
   return `${short(monday)} a ${short(monday + 4 * DAY)}`;
+}
+
+function pushTo<K>(map: Map<K, number[]>, key: K, value: number) {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
 }
 
 function usePersistentState<T>(key: string, initial: T) {
@@ -174,6 +250,100 @@ function usePersistentState<T>(key: string, initial: T) {
   }, [key, value]);
   return [value, setValue] as const;
 }
+
+/* =====================================================================
+   REGRAS DO SCORECARD
+   ===================================================================== */
+
+/* Total proporcional: pontos obtidos ÷ pontos possíveis × 10, arredondado para o inteiro mais próximo.
+   Parâmetros "-" (null) saem do cálculo. */
+function totalFromScores(scores: (number | null)[]): number | null {
+  const applicable = scores.filter((s): s is number => s !== null);
+  if (applicable.length === 0) return null;
+  const obtained = applicable.reduce((a, b) => a + b, 0);
+  return Math.round((obtained / (applicable.length * 2)) * 10);
+}
+
+function conceptOf(total: number, sc: Scorecard): Concept {
+  if (total >= sc.excellentMin) return "Excelente";
+  if (total >= sc.adequateMin) return "Adequado";
+  if (total >= sc.attentionMin) return "Atenção";
+  return "Crítico";
+}
+
+function rangeLabel(concept: Concept, sc: Scorecard) {
+  const [lo, hi] =
+    concept === "Excelente"
+      ? [sc.excellentMin, 10]
+      : concept === "Adequado"
+      ? [sc.adequateMin, sc.excellentMin - 1]
+      : concept === "Atenção"
+      ? [sc.attentionMin, sc.adequateMin - 1]
+      : [0, sc.attentionMin - 1];
+  return lo === hi ? `${lo}` : `${lo} a ${hi}`;
+}
+
+function parseConcept(value: string): Concept | null {
+  const s = norm(value);
+  if (s.startsWith("excelente")) return "Excelente";
+  if (s.startsWith("adequad")) return "Adequado";
+  if (s.startsWith("atencao")) return "Atenção";
+  if (s.startsWith("critic")) return "Crítico";
+  return null;
+}
+
+function csatClass(value: string): "pos" | "neg" | null {
+  const s = norm(value);
+  if (!s) return null;
+  if (/^\d+([.,]\d+)?$/.test(s)) {
+    const n = Number(s.replace(",", "."));
+    if (n >= 1 && n <= 5) return n >= 4 ? "pos" : "neg";
+    return null;
+  }
+  if (/detrator|insatisf|ruim|pessim|negativ|discord/.test(s)) return "neg";
+  if (/satisf|otim|bom|excelente|positiv|promotor|concord/.test(s)) return "pos";
+  return null;
+}
+
+function csatOf(list: Monitoria[]): { rate: number | null; answered: number } {
+  let pos = 0;
+  let neg = 0;
+  list.forEach((r) => {
+    const c = csatClass(r.csat);
+    if (c === "pos") pos++;
+    else if (c === "neg") neg++;
+  });
+  const answered = pos + neg;
+  return { rate: answered ? (pos / answered) * 100 : null, answered };
+}
+
+const scored = (list: Monitoria[]): Scored[] => list.filter((r): r is Scored => r.nota !== null);
+
+/* =====================================================================
+   PERÍODOS
+   ===================================================================== */
+
+function getWindow(period: string, now: number): Win {
+  if (period === "Todo o período") {
+    return { from: -Infinity, to: Infinity, prevFrom: -Infinity, prevTo: -Infinity, hasPrev: false };
+  }
+  if (period === "Semana anterior") {
+    const thisMonday = mondayOf(now);
+    return {
+      from: thisMonday - 7 * DAY,
+      to: thisMonday,
+      prevFrom: thisMonday - 14 * DAY,
+      prevTo: thisMonday - 7 * DAY,
+      hasPrev: true,
+    };
+  }
+  const days = PERIOD_DAYS[period] ?? 30;
+  return { from: now - days * DAY, to: Infinity, prevFrom: now - 2 * days * DAY, prevTo: now - days * DAY, hasPrev: true };
+}
+
+/* Registros sem data entram sempre no período atual (e nunca no anterior) */
+const inCurrent = (r: Monitoria, w: Win) => r.date === null || (r.date >= w.from && r.date < w.to);
+const inPrev = (r: Monitoria, w: Win) => w.hasPrev && r.date !== null && r.date >= w.prevFrom && r.date < w.prevTo;
 
 /* =====================================================================
    LEITURA DO GOOGLE SHEETS (CSV)
@@ -243,17 +413,24 @@ function parseCSV(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
-const FIELDS = [
-  { field: "consultor", label: "Consultor(a)", keys: ["consultor", "analista", "atendente", "agente", "colaborador"] },
-  { field: "nota", label: "Nota final", keys: ["nota final", "nota geral", "nota", "pontuacao", "score"] },
+const FIELDS: { field: string; label: string; keys: string[] }[] = [
+  { field: "consultor", label: "Consultor(a)", keys: ["consultor", "atendente", "agente", "colaborador"] },
+  { field: "nota", label: "Nota total (0 a 10)", keys: ["nota final", "nota total", "total", "pontuacao total", "nota geral", "nota", "pontuacao", "score"] },
+  { field: "conceito", label: "Conceito", keys: ["conceito"] },
+  { field: "p1", label: "1. Classificação e triagem", keys: ["classificacao e triagem", "triagem", "p1", "parametro 1", "param 1", "criterio 1"] },
+  { field: "p2", label: "2. Condução ativa", keys: ["conducao ativa", "conducao", "p2", "parametro 2", "param 2", "criterio 2"] },
+  { field: "p3", label: "3. Comunicação e prazos", keys: ["comunicacao e prazos", "comunicacao", "p3", "parametro 3", "param 3", "criterio 3"] },
+  { field: "p4", label: "4. Conclusão validada", keys: ["conclusao validada", "conclusao", "p4", "parametro 4", "param 4", "criterio 4"] },
+  { field: "p5", label: "5. Registro interno", keys: ["registro interno", "registro", "p5", "parametro 5", "param 5", "criterio 5"] },
   { field: "data", label: "Data", keys: ["data"] },
   { field: "semana", label: "Semana", keys: ["semana"] },
-  { field: "categoria", label: "Categoria", keys: ["categoria", "fila", "assunto"] },
+  { field: "categoria", label: "Categoria", keys: ["categoria"] },
   { field: "ticket", label: "ID do ticket", keys: ["id ticket", "ticket", "protocolo", "chamado"] },
-  { field: "csat", label: "Status CSAT", keys: ["status csat", "csat"] },
-  { field: "resolvida", label: "Resolvida?", keys: ["resolvida", "resolvido", "resolucao"] },
-  { field: "time", label: "Time / Equipe", keys: ["time", "equipe"] },
-] as const;
+  { field: "csat", label: "CSAT", keys: ["status csat", "csat"] },
+  { field: "time", label: "Time / Torre", keys: ["time", "equipe", "torre"] },
+  { field: "alerta", label: "Alerta de prioridade", keys: ["alerta", "alerta prioridade", "prioridade rebaixada"] },
+  { field: "atencao", label: "Ponto de atenção", keys: ["ponto de atencao", "pontos de atencao"] },
+];
 
 function findCol(headers: string[], keys: readonly string[]): number {
   for (const k of keys) {
@@ -297,20 +474,33 @@ function parseDateCell(value: string): number | null {
   return new Date(year, month - 1, day).getTime();
 }
 
+/* Célula de parâmetro: 0, 1 ou 2; qualquer outra coisa ("-", vazio, N/A) vira null = não se aplica */
+function parseScoreCell(value: string): number | null {
+  const n = parseNumber(value);
+  return n === 0 || n === 1 || n === 2 ? n : null;
+}
+
+const NO_ALERT = ["nao", "n", "-", "0", "false", "nenhum", "ok", "sem alerta"];
+
 function recordsFromCSV(text: string) {
   const rows = parseCSV(text);
+  const keysOf = (field: string) => FIELDS.find((f) => f.field === field)!.keys;
+  const paramFields = ["p1", "p2", "p3", "p4", "p5"];
 
   let headerIdx = -1;
   for (let i = 0; i < Math.min(10, rows.length); i++) {
     const h = rows[i].map(normHeader);
-    if (findCol(h, FIELDS[0].keys) >= 0 && findCol(h, FIELDS[1].keys) >= 0) {
+    const hasConsultor = findCol(h, keysOf("consultor")) >= 0;
+    const hasNota = findCol(h, keysOf("nota")) >= 0;
+    const paramsFound = paramFields.filter((p) => findCol(h, keysOf(p)) >= 0).length;
+    if (hasConsultor && (hasNota || paramsFound >= 3)) {
       headerIdx = i;
       break;
     }
   }
   if (headerIdx < 0) {
     throw new Error(
-      `Não encontrei as colunas de consultor e de nota. Cabeçalhos lidos na primeira linha: ${
+      `Não encontrei a coluna do consultor e a da nota (ou das notas dos 5 parâmetros). Cabeçalhos lidos na primeira linha: ${
         (rows[0] ?? []).filter((c) => c.trim()).join(" | ") || "(vazio)"
       }`
     );
@@ -324,22 +514,39 @@ function recordsFromCSV(text: string) {
     idx[f.field] = c;
     return { field: f.field, label: f.label, header: c >= 0 ? rawHeaders[c].trim() : null };
   });
+  const hasAllParams = paramFields.every((p) => idx[p] >= 0);
 
-  type Raw = Omit<Monitoria, "nota"> & { nota: number };
-  const raw: Raw[] = [];
+  const raw: Monitoria[] = [];
   let skipped = 0;
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
     const get = (c: number) => (c >= 0 ? (r[c] ?? "").trim() : "");
     const consultor = get(idx.consultor);
-    const nota = parseNumber(get(idx.nota));
-    if (!consultor || Number.isNaN(nota)) {
+    if (!consultor) {
       skipped++;
       continue;
     }
+
+    const paramCells = paramFields.map((p) => get(idx[p]));
+    const scores = hasAllParams && paramCells.some((c) => c !== "") ? paramCells.map(parseScoreCell) : null;
+
+    const notaText = get(idx.nota);
+    const conceptText = get(idx.conceito);
+    const disregarded = /desconsider/.test(norm(notaText)) || /desconsider/.test(norm(conceptText));
+
+    let nota: number | null = parseNumber(notaText);
+    if (Number.isNaN(nota) && scores) nota = totalFromScores(scores);
+    if (disregarded) nota = null;
+    else if (nota === null || Number.isNaN(nota)) {
+      skipped++;
+      continue;
+    }
+
     const semana = get(idx.semana);
     const date = parseDateCell(get(idx.data)) ?? parseDateCell(semana);
+    const alertText = norm(get(idx.alerta));
+
     raw.push({
       id: `r${i}`,
       date: date === null ? null : startOfDay(date),
@@ -348,9 +555,13 @@ function recordsFromCSV(text: string) {
       categoria: get(idx.categoria),
       ticket: get(idx.ticket).replace(/^#/, ""),
       csat: get(idx.csat),
-      resolvida: get(idx.resolvida),
-      nota,
       team: get(idx.time),
+      scores: disregarded ? null : scores,
+      nota,
+      concept: disregarded ? null : parseConcept(conceptText),
+      flag: alertText !== "" && !NO_ALERT.includes(alertText),
+      disregarded,
+      attention: get(idx.atencao),
     });
   }
 
@@ -358,11 +569,12 @@ function recordsFromCSV(text: string) {
     throw new Error("Encontrei as colunas, mas nenhuma linha tem consultor e nota válidos.");
   }
 
-  const max = Math.max(...raw.map((x) => x.nota));
-  const factor = max <= 1 ? 100 : max <= 10 ? 10 : 1;
-  const scaleNote =
-    factor === 1 ? "" : `Notas na escala de 0 a ${factor === 100 ? "1" : "10"} foram convertidas para 0 a 100.`;
-  const records: Monitoria[] = raw.map((x) => ({ ...x, nota: Math.round(x.nota * factor * 10) / 10 }));
+  /* A nota do processo vai de 0 a 10. Se a planilha usar 0 a 100, converte. */
+  const values = raw.map((x) => x.nota).filter((n): n is number => n !== null);
+  const max = values.length ? Math.max(...values) : 0;
+  const factor = max > 10 ? 0.1 : 1;
+  const scaleNote = factor === 1 ? "" : "Notas na escala de 0 a 100 foram convertidas para 0 a 10.";
+  const records = raw.map((x) => (x.nota === null || factor === 1 ? x : { ...x, nota: Math.round(x.nota * factor * 10) / 10 }));
 
   return { records, skipped, scaleNote, mapping };
 }
@@ -371,16 +583,16 @@ function recordsFromCSV(text: string) {
    DADOS DE DEMONSTRAÇÃO (usados só enquanto nenhuma planilha estiver conectada)
    ===================================================================== */
 
-const DEMO_TEAMS = ["Equipe Safira", "Equipe Esmeralda", "Equipe Rubi"];
+const DEMO_TEAMS = ["Torre Safira", "Torre Esmeralda", "Torre Rubi"];
 
 const DEMO_DEFS = [
-  { name: "Marina Costa", team: "Equipe Safira", base: 96, volume: 16, drift: 0.05 },
-  { name: "Rafael Martins", team: "Equipe Safira", base: 94, volume: 15, drift: 0.04 },
-  { name: "Ana Carolina", team: "Equipe Esmeralda", base: 91.5, volume: 14, drift: 0.02 },
-  { name: "Carlos Lima", team: "Equipe Esmeralda", base: 87, volume: 12, drift: 0.03 },
-  { name: "Bianca Oliveira", team: "Equipe Safira", base: 84.5, volume: 11, drift: 0.03 },
-  { name: "Diego Freitas", team: "Equipe Esmeralda", base: 78.5, volume: 10, drift: -0.06 },
-  { name: "Juliana Alves", team: "Equipe Rubi", base: 93, volume: 10, drift: 0.07 },
+  { name: "Marina Costa", team: "Torre Safira", skill: 0.9, volume: 16, drift: 0.05 },
+  { name: "Rafael Martins", team: "Torre Safira", skill: 0.84, volume: 15, drift: 0.04 },
+  { name: "Ana Carolina", team: "Torre Esmeralda", skill: 0.74, volume: 14, drift: 0.02 },
+  { name: "Carlos Lima", team: "Torre Esmeralda", skill: 0.62, volume: 12, drift: 0.03 },
+  { name: "Bianca Oliveira", team: "Torre Safira", skill: 0.55, volume: 11, drift: 0.03 },
+  { name: "Diego Freitas", team: "Torre Esmeralda", skill: 0.38, volume: 10, drift: -0.08 },
+  { name: "Juliana Alves", team: "Torre Rubi", skill: 0.7, volume: 10, drift: 0.09 },
 ];
 
 const DEMO_PEOPLE: Person[] = DEMO_DEFS.map((d, i) => ({
@@ -406,23 +618,49 @@ function buildDemoRecords(): Monitoria[] {
   const today = startOfDay(Date.now());
   const categories = ["Suporte Operacional", "Suporte Técnico", "eSocial", "Admissão Digital"];
   const out: Monitoria[] = [];
+
   DEMO_DEFS.forEach((d) => {
     const count = d.volume * 3;
     for (let k = 0; k < count; k++) {
       const offset = Math.floor(rand() * 90);
       const date = today - offset * DAY;
-      const nota = clamp(Math.round((d.base + (rand() - 0.5) * 12 + (45 - offset) * d.drift) * 10) / 10, 40, 100);
-      out.push({
+      const base = {
         id: `d${out.length}`,
         date,
         week: weekLabel(date),
         consultor: d.name,
         categoria: categories[Math.floor(rand() * categories.length)],
         ticket: String(650000 + Math.floor(rand() * 20000)),
-        csat: rand() < 0.8 ? "Respondido" : "Não respondido",
-        resolvida: nota >= 85 ? (rand() < 0.92 ? "Sim" : "Não") : rand() < 0.5 ? "Sim" : "Não",
-        nota,
         team: d.team,
+      };
+
+      if (rand() < 0.04) {
+        out.push({ ...base, csat: "", scores: null, nota: null, concept: null, flag: false, disregarded: true, attention: "Atendimento 100% por bot." });
+        continue;
+      }
+
+      const skill = clamp(d.skill + ((45 - offset) / 45) * d.drift * 2, 0.12, 0.97);
+      const scores: (number | null)[] = [0, 1, 2, 3, 4].map(() => {
+        const u = rand();
+        if (u < skill) return 2;
+        return u < skill + (1 - skill) * 0.6 ? 1 : 0;
+      });
+      if (rand() < 0.25) {
+        scores[1] = null;
+        scores[2] = null;
+      }
+      const nota = totalFromScores(scores) as number;
+      const lost = DEFAULT_SCORECARD.params.filter((_, i) => scores[i] !== null && (scores[i] as number) < 2).map((p) => p.name);
+      const u = rand();
+      out.push({
+        ...base,
+        csat: u < 0.22 ? "Sem resposta" : u < 0.22 + (0.5 + nota * 0.05) * 0.78 ? "Satisfeito" : "Detrator",
+        scores,
+        nota,
+        concept: null,
+        flag: nota <= 4 && rand() < 0.25,
+        disregarded: false,
+        attention: lost.length ? `Perdeu pontos em: ${lost.join(", ")}.` : "",
       });
     }
   });
@@ -532,37 +770,20 @@ function buildTeamList(teams: string[], people: Person[]): string[] {
   return list;
 }
 
-function pushTo(map: Map<string, number[]>, key: string, value: number) {
-  const list = map.get(key);
-  if (list) list.push(value);
-  else map.set(key, [value]);
-}
-
-function computeRows(people: Person[], records: Monitoria[], days: number | null, now: number): AgentRow[] {
-  const curFrom = days === null ? -Infinity : now - days * DAY;
-  const prevFrom = days === null ? -Infinity : now - 2 * days * DAY;
+function computeRows(people: Person[], records: Monitoria[], w: Win): AgentRow[] {
   const cur = new Map<string, number[]>();
   const prev = new Map<string, number[]>();
-
   records.forEach((r) => {
+    if (r.nota === null) return;
     const key = norm(r.consultor);
-    const inCurrent = days === null || r.date === null || r.date >= curFrom;
-    const inPrevious = days !== null && r.date !== null && r.date >= prevFrom && r.date < curFrom;
-    if (inCurrent) pushTo(cur, key, r.nota);
-    else if (inPrevious) pushTo(prev, key, r.nota);
+    if (inCurrent(r, w)) pushTo(cur, key, r.nota);
+    else if (inPrev(r, w)) pushTo(prev, key, r.nota);
   });
-
   return people.map((p) => {
     const c = cur.get(norm(p.name)) ?? [];
     const pr = prev.get(norm(p.name)) ?? [];
     const score = avg(c);
-    const prevScore = avg(pr);
-    return {
-      ...p,
-      audits: c.length,
-      score,
-      trend: c.length && pr.length && prevScore ? ((score - prevScore) / prevScore) * 100 : null,
-    };
+    return { ...p, audits: c.length, score, trend: c.length && pr.length ? score - avg(pr) : null };
   });
 }
 
@@ -571,12 +792,12 @@ function weightedScore(rows: AgentRow[]) {
   return total ? rows.reduce((sum, r) => sum + r.score * r.audits, 0) / total : 0;
 }
 
-const isYes = (v: string) => ["sim", "s", "yes", "y", "true", "1", "resolvido", "resolvida"].includes(norm(v));
-const isResponded = (v: string) => norm(v).startsWith("respondid");
-
-function rateOf(list: Monitoria[], field: "resolvida" | "csat", test: (v: string) => boolean): number | null {
-  const filled = list.filter((r) => r[field].trim());
-  return filled.length ? (filled.filter((r) => test(r[field])).length / filled.length) * 100 : null;
+function conceptCounts(list: Scored[]): Record<Concept, number> {
+  const counts: Record<Concept, number> = { Excelente: 0, Adequado: 0, Atenção: 0, Crítico: 0 };
+  list.forEach((r) => {
+    if (r.concept) counts[r.concept]++;
+  });
+  return counts;
 }
 
 /* =====================================================================
@@ -660,6 +881,109 @@ function Delta({ value, lowerIsBetter = false, unit = "%" }: { value: number | n
   );
 }
 
+function ConceptPill({ concept }: { concept: Concept | null }) {
+  if (!concept) return <span className="muted-text">—</span>;
+  const color = CONCEPT_COLORS[concept];
+  return (
+    <span className="pill" style={{ color, background: `${color}22` }}>
+      {concept}
+    </span>
+  );
+}
+
+function ScoreCell({ value }: { value: number | null }) {
+  return <span className={`score-cell s${value === null ? "na" : value}`}>{value === null ? "-" : value}</span>;
+}
+
+function ConceptDistribution({ list }: { list: Scored[] }) {
+  const counts = conceptCounts(list);
+  const total = CONCEPTS.reduce((sum, c) => sum + counts[c], 0);
+  if (total === 0) return <p className="empty">Sem monitorias pontuadas no período.</p>;
+  return (
+    <>
+      <div className="stack-bar">
+        {CONCEPTS.map((c) => (
+          <div
+            key={c}
+            className="stack-seg"
+            title={`${c}: ${counts[c]}`}
+            style={{ width: `${(counts[c] / total) * 100}%`, background: CONCEPT_COLORS[c] }}
+          />
+        ))}
+      </div>
+      <div className="concept-legend">
+        {CONCEPTS.map((c) => (
+          <div key={c}>
+            <span>
+              <i className="dot" style={{ background: CONCEPT_COLORS[c] }} />
+              {c}
+            </span>
+            <strong>{counts[c]}</strong>
+            <small>{fmt((counts[c] / total) * 100, 0)}%</small>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ParamBars({ list, scorecard }: { list: Scored[]; scorecard: Scorecard }) {
+  const withScores = list.filter((r) => r.scores);
+  if (withScores.length === 0) {
+    return <p className="empty">A planilha ainda não tem as colunas dos 5 parâmetros, ou não há monitorias no período.</p>;
+  }
+  const averages = scorecard.params.map((_, i) => {
+    const values = withScores.map((r) => (r.scores as (number | null)[])[i]).filter((v): v is number => v !== null);
+    return values.length ? avg(values) : null;
+  });
+  const known = averages.filter((a): a is number => a !== null);
+  const lowest = known.length ? Math.min(...known) : null;
+  return (
+    <div>
+      {scorecard.params.map((p, i) => {
+        const a = averages[i];
+        return (
+          <div key={p.id} className="bar-row">
+            <span>{p.id}. {p.name}</span>
+            <div className="bar-track">
+              <div
+                className={`bar-fill ${a !== null && a === lowest ? "weak" : ""}`}
+                style={{ width: `${a === null ? 0 : (a / 2) * 100}%` }}
+              />
+            </div>
+            <strong>{a === null ? "—" : `${fmt(a, 2)} / 2`}</strong>
+          </div>
+        );
+      })}
+      <p className="muted" style={{ fontSize: 12 }}>A barra em vermelho é o parâmetro em que a operação mais perde pontos.</p>
+    </div>
+  );
+}
+
+function WeeklyEvolution({ list }: { list: Monitoria[] }) {
+  const byWeek = new Map<number, number[]>();
+  list.forEach((r) => {
+    if (r.nota === null || r.date === null) return;
+    pushTo(byWeek, mondayOf(r.date), r.nota);
+  });
+  const weeks = Array.from(byWeek.entries()).sort((a, b) => a[0] - b[0]).slice(-8);
+  if (weeks.length === 0) return <p className="empty">Sem monitorias datadas para montar a evolução.</p>;
+  return (
+    <div className="week-bars">
+      {weeks.map(([monday, values]) => {
+        const a = avg(values);
+        return (
+          <div key={monday} className="week-col" title={`${values.length} monitorias`}>
+            <strong>{fmt(a)}</strong>
+            <div className="col-bar" style={{ height: `${(a / 10) * 110}px` }} />
+            <small>{new Date(monday).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}</small>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => void }) {
   const items = [
     ["dashboard", "Dashboard"],
@@ -702,12 +1026,12 @@ function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => vo
 
 function Header({ page }: { page: string }) {
   const pages: Record<string, [string, string]> = {
-    dashboard: ["Dashboard gerencial", "Acompanhe o desempenho da sua operação em tempo real."],
-    monitorias: ["Base de monitorias", "Registros lidos da planilha que alimenta toda a ferramenta."],
-    parameters: ["Construtor de parâmetros", "Defina os critérios da avaliação e quanto cada um pesa na nota final."],
+    dashboard: ["Dashboard gerencial", "Nota, conceitos, parâmetros e alertas da operação."],
+    monitorias: ["Base de monitorias", "Avaliações lidas da planilha que alimenta toda a ferramenta."],
+    parameters: ["Scorecard de monitoria", "Os 5 parâmetros, a régua de conceitos e o simulador do Processo de Monitoria."],
     team: ["Gestão de equipe", "Cadastre times e colaboradores e acompanhe os indicadores de cada um."],
-    reports: ["Relatórios analíticos", "Explore tendências e consolidados da operação."],
-    settings: ["Configurações e Governança", "Fonte de dados, perfis de mercado e metas."],
+    reports: ["Relatório semanal", "Resumo executivo, conceitos por time, parâmetros e alertas para a liderança."],
+    settings: ["Configurações e Governança", "Fonte de dados e metas do processo."],
   };
   const [title, description] = pages[page] ?? pages.dashboard;
   return (
@@ -720,7 +1044,7 @@ function Header({ page }: { page: string }) {
         <span className="avatar">PR</span>
         <div>
           <strong>Paulo Reis</strong>
-          <small>Gestor de Qualidade</small>
+          <small>Analista de Qualidade</small>
         </div>
       </div>
     </header>
@@ -763,7 +1087,7 @@ function SourceBanner({
   return (
     <div className="notice success source-banner">
       <span>
-        <strong>Planilha conectada:</strong> {sheet.records.length.toLocaleString("pt-BR")} monitorias
+        <strong>Planilha conectada:</strong> {sheet.records.length.toLocaleString("pt-BR")} linhas
         {sheet.syncedAt ? ` · atualizado às ${fmtTime(sheet.syncedAt)}` : ""}
         {sheet.skipped > 0 ? ` · ${sheet.skipped} linhas ignoradas (sem consultor ou nota)` : ""}
         {sheet.scaleNote ? ` · ${sheet.scaleNote}` : ""}
@@ -781,44 +1105,42 @@ function Dashboard({
   people,
   records,
   teamList,
-  config,
+  scorecard,
+  goals,
   openAudit,
 }: {
   people: Person[];
   records: Monitoria[];
   teamList: string[];
-  config: Config;
+  scorecard: Scorecard;
+  goals: Goals;
   openAudit: (person?: Person) => void;
 }) {
   const [period, setPeriod] = useState("Últimos 30 dias");
   const [team, setTeam] = useState(ALL_TEAMS);
   const [consultant, setConsultant] = useState(ALL_CONSULTANTS);
 
-  const days = PERIODS[period];
   const now = Date.now();
-  const curFrom = days === null ? -Infinity : now - days * DAY;
-  const prevFrom = days === null ? -Infinity : now - 2 * days * DAY;
+  const w = getWindow(period, now);
 
   const teamOf = new Map(people.map((p) => [norm(p.name), p.team]));
   const matches = (r: Monitoria) =>
     (team === ALL_TEAMS || (teamOf.get(norm(r.consultor)) ?? NO_TEAM) === team) &&
     (consultant === ALL_CONSULTANTS || norm(r.consultor) === norm(consultant));
 
-  const current = records.filter((r) => matches(r) && (days === null || r.date === null || r.date >= curFrom));
-  const previous =
-    days === null
-      ? []
-      : records.filter((r) => matches(r) && r.date !== null && r.date >= prevFrom && r.date < curFrom);
+  const matched = records.filter(matches);
+  const current = matched.filter((r) => inCurrent(r, w));
+  const previous = matched.filter((r) => inPrev(r, w));
+  const cs = scored(current);
+  const ps = scored(previous);
 
-  const stats = (list: Monitoria[]) => ({
-    count: list.length,
-    score: avg(list.map((r) => r.nota)),
-    dev: list.length ? (list.filter((r) => r.nota < config.minScore).length / list.length) * 100 : 0,
-  });
-  const cur = stats(current);
-  const prev = stats(previous);
-  const pct = (c: number, p: number) => (p ? ((c - p) / p) * 100 : null);
-  const hasPrev = previous.length > 0;
+  const curAvg = avg(cs.map((r) => r.nota));
+  const prevAvg = avg(ps.map((r) => r.nota));
+  const critPct = cs.length ? (cs.filter((r) => r.concept === "Crítico").length / cs.length) * 100 : 0;
+  const prevCritPct = ps.length ? (ps.filter((r) => r.concept === "Crítico").length / ps.length) * 100 : 0;
+  const csat = csatOf(current);
+  const hasPrev = ps.length > 0;
+  const disregardedCount = current.length - cs.length;
 
   const consultantOptions = [
     ALL_CONSULTANTS,
@@ -831,11 +1153,15 @@ function Dashboard({
   const rows = computeRows(
     people.filter((p) => (team === ALL_TEAMS || p.team === team) && (consultant === ALL_CONSULTANTS || p.name === consultant)),
     records,
-    days,
-    now
+    w
   )
     .filter((r) => r.audits > 0)
     .sort((a, b) => b.score - a.score);
+
+  const alerts = current
+    .filter((r) => r.flag || r.concept === "Crítico")
+    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0))
+    .slice(0, 8);
 
   const dated = records.filter((r) => r.date !== null).map((r) => r.date as number);
   const lastDate = dated.length ? Math.max(...dated) : null;
@@ -850,7 +1176,7 @@ function Dashboard({
     <main className="content">
       <section className="filterbar">
         <div className="filters">
-          <Dropdown label="PERÍODO" value={period} options={Object.keys(PERIODS)} onChange={setPeriod} />
+          <Dropdown label="PERÍODO" value={period} options={PERIOD_NAMES} onChange={setPeriod} />
           <Dropdown
             label="TIME"
             value={team}
@@ -873,38 +1199,112 @@ function Dashboard({
         </div>
       )}
 
-      <section className="kpis">
+      <section className="kpis" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
         <article className="kpi-card" onClick={() => openAudit()} style={{ cursor: "pointer" }}>
           <div className="kpi-header">
-            <small>NOTA MÉDIA GERAL</small>
-            <Delta value={hasPrev ? pct(cur.score, prev.score) : null} />
+            <small>NOTA MÉDIA</small>
+            <Delta value={hasPrev ? curAvg - prevAvg : null} unit=" pts" />
           </div>
-          <div className="kpi-body"><strong>{fmt(cur.score)}</strong><span>/ 100</span></div>
-          <p>{hasPrev ? `vs. ${fmt(prev.score)} no período anterior` : "sem período anterior para comparar"}</p>
+          <div className="kpi-body"><strong>{fmt(curAvg)}</strong><span>/ 10</span></div>
+          <p>{hasPrev ? `vs. ${fmt(prevAvg)} no período anterior` : "sem período anterior para comparar"}</p>
         </article>
         <article className="kpi-card">
           <div className="kpi-header">
-            <small>MONITORIAS REALIZADAS</small>
-            <Delta value={hasPrev ? pct(cur.count, prev.count) : null} />
+            <small>MONITORIAS AVALIADAS</small>
+            <Delta value={hasPrev && ps.length ? ((cs.length - ps.length) / ps.length) * 100 : null} />
           </div>
-          <div className="kpi-body"><strong>{cur.count.toLocaleString("pt-BR")}</strong></div>
-          <p>{hasPrev ? `vs. ${prev.count.toLocaleString("pt-BR")} no período anterior` : period.toLowerCase()}</p>
+          <div className="kpi-body"><strong>{cs.length.toLocaleString("pt-BR")}</strong></div>
+          <p>{disregardedCount > 0 ? `${disregardedCount} desconsiderada(s) (bot)` : period.toLowerCase()}</p>
         </article>
         <article className="kpi-card">
           <div className="kpi-header">
-            <small>TAXA DE DESVIOS</small>
-            <Delta value={hasPrev ? cur.dev - prev.dev : null} lowerIsBetter unit=" p.p." />
+            <small>TICKETS CRÍTICOS</small>
+            <Delta value={hasPrev ? critPct - prevCritPct : null} lowerIsBetter unit=" p.p." />
           </div>
-          <div className="kpi-body"><strong>{fmt(cur.dev)}%</strong></div>
-          <p>monitorias abaixo de {config.minScore} pontos</p>
+          <div className="kpi-body"><strong>{fmt(critPct)}%</strong></div>
+          <p>nota de {rangeLabel("Crítico", scorecard)} pontos</p>
         </article>
+        <article className="kpi-card">
+          <div className="kpi-header">
+            <small>CSAT</small>
+            {csat.rate !== null && (
+              <span className={csat.rate >= goals.csat ? "positive" : "negative"}>
+                {csat.rate >= goals.csat ? "na meta" : "abaixo da meta"}
+              </span>
+            )}
+          </div>
+          <div className="kpi-body"><strong>{csat.rate === null ? "—" : `${fmt(csat.rate)}%`}</strong></div>
+          <p>
+            meta {goals.csat}% ·{" "}
+            {csat.rate === null ? "sem respostas reconhecidas na coluna CSAT" : `${csat.answered} respostas`}
+          </p>
+        </article>
+      </section>
+
+      <div className="grid-2">
+        <section className="panel">
+          <h3>Distribuição por conceito</h3>
+          <p className="muted" style={{ marginBottom: 4 }}>Quantidade de monitorias em cada faixa da régua.</p>
+          <ConceptDistribution list={cs} />
+        </section>
+        <section className="panel">
+          <h3>Média por parâmetro</h3>
+          <p className="muted" style={{ marginBottom: 4 }}>Onde a operação perde mais pontos (de 0 a 2).</p>
+          <ParamBars list={cs} scorecard={scorecard} />
+        </section>
+      </div>
+
+      <section className="panel" style={{ marginBottom: 24 }}>
+        <h3>Evolução semanal</h3>
+        <p className="muted" style={{ marginBottom: 0 }}>Nota média por semana (últimas 8 semanas com dados).</p>
+        <WeeklyEvolution list={matched} />
+      </section>
+
+      <section className="panel" style={{ marginBottom: 24 }}>
+        <div className="panel-heading">
+          <div>
+            <h3>Alertas para a liderança</h3>
+            <p>Tickets Críticos e prioridade possivelmente rebaixada no período</p>
+          </div>
+          <span className={`badge ${alerts.length ? "warn" : "ok"}`}>{alerts.length ? `${alerts.length} em destaque` : "Nenhum alerta"}</span>
+        </div>
+        {alerts.length === 0 ? (
+          <p className="empty">Nenhum ticket Crítico ou com alerta de prioridade no período.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>SEMANA</th>
+                  <th>CONSULTOR</th>
+                  <th>TICKET</th>
+                  <th>NOTA</th>
+                  <th>CONCEITO</th>
+                  <th>ALERTA</th>
+                </tr>
+              </thead>
+              <tbody>
+                {alerts.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.week || "—"}</td>
+                    <td><strong>{r.consultor}</strong></td>
+                    <td>{r.ticket ? <span className="ticket">#{r.ticket}</span> : "—"}</td>
+                    <td>{r.nota === null ? "—" : fmt(r.nota, 0)}</td>
+                    <td><ConceptPill concept={r.concept} /></td>
+                    <td>{r.flag ? "Prioridade possivelmente rebaixada" : "Ticket Crítico"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="panel ranking-panel">
         <div className="panel-heading">
           <div>
             <h3>Ranking da equipe</h3>
-            <p>Desempenho dos consultores no período selecionado</p>
+            <p>Nota média dos consultores no período selecionado</p>
           </div>
           <button className="secondary-button" onClick={() => openAudit()}>Ver monitorias</button>
         </div>
@@ -936,9 +1336,9 @@ function Dashboard({
                     <td>{row.team}</td>
                     <td>{row.audits}</td>
                     <td>
-                      <strong className={row.score < config.minScore ? "negative" : ""}>{fmt(row.score)}</strong> / 100
+                      <strong style={{ color: CONCEPT_COLORS[conceptOf(Math.round(row.score), scorecard)] }}>{fmt(row.score)}</strong> / 10
                     </td>
-                    <td><Delta value={row.trend} /></td>
+                    <td><Delta value={row.trend} unit=" pts" /></td>
                   </tr>
                 ))}
               </tbody>
@@ -954,17 +1354,17 @@ function Dashboard({
    MONITORIAS (tabela da planilha)
    ===================================================================== */
 
-function Monitorias({ records, config }: { records: Monitoria[]; config: Config }) {
+function Monitorias({ records }: { records: Monitoria[] }) {
   const [search, setSearch] = useState("");
   const [period, setPeriod] = useState("Todo o período");
   const [limit, setLimit] = useState(100);
 
-  const days = PERIODS[period];
-  const now = Date.now();
+  const w = getWindow(period, Date.now());
   const q = norm(search);
+  const showParams = records.some((r) => r.scores);
 
   const list = records
-    .filter((r) => days === null || r.date === null || r.date >= now - days * DAY)
+    .filter((r) => inCurrent(r, w))
     .filter((r) => !q || norm(`${r.consultor} ${r.ticket} ${r.categoria}`).includes(q))
     .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
 
@@ -972,7 +1372,7 @@ function Monitorias({ records, config }: { records: Monitoria[]; config: Config 
     <main className="content">
       <div className="page-actions" style={{ marginBottom: 16 }}>
         <div className="filters">
-          <Dropdown label="PERÍODO" value={period} options={Object.keys(PERIODS)} onChange={(v) => { setPeriod(v); setLimit(100); }} />
+          <Dropdown label="PERÍODO" value={period} options={PERIOD_NAMES} onChange={(v) => { setPeriod(v); setLimit(100); }} />
           <input
             className="input search"
             placeholder="Buscar consultor, ticket ou categoria"
@@ -980,7 +1380,7 @@ function Monitorias({ records, config }: { records: Monitoria[]; config: Config 
             onChange={(e) => { setSearch(e.target.value); setLimit(100); }}
           />
         </div>
-        <span className="muted-text">{list.length.toLocaleString("pt-BR")} monitorias</span>
+        <span className="muted-text">{list.length.toLocaleString("pt-BR")} linhas</span>
       </div>
 
       <div className="panel">
@@ -995,10 +1395,12 @@ function Monitorias({ records, config }: { records: Monitoria[]; config: Config 
                     <th>SEMANA</th>
                     <th>CONSULTOR(A)</th>
                     <th>CATEGORIA</th>
-                    <th>ID TICKET</th>
-                    <th>STATUS CSAT</th>
-                    <th>RESOLVIDA?</th>
-                    <th>NOTA FINAL</th>
+                    <th>TICKET</th>
+                    {showParams && [1, 2, 3, 4, 5].map((n) => <th key={n} title="Parâmetro">P{n}</th>)}
+                    <th>NOTA</th>
+                    <th>CONCEITO</th>
+                    <th>CSAT</th>
+                    <th>ALERTA</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1008,11 +1410,14 @@ function Monitorias({ records, config }: { records: Monitoria[]; config: Config 
                       <td><strong>{m.consultor}</strong></td>
                       <td>{m.categoria || "—"}</td>
                       <td>{m.ticket ? <span className="ticket">#{m.ticket}</span> : "—"}</td>
+                      {showParams &&
+                        [0, 1, 2, 3, 4].map((i) => (
+                          <td key={i}>{m.scores ? <ScoreCell value={m.scores[i]} /> : "—"}</td>
+                        ))}
+                      <td>{m.disregarded ? <span className="muted-text">Desconsiderado</span> : <strong>{fmt(m.nota ?? 0, 0)}</strong>}</td>
+                      <td><ConceptPill concept={m.concept} /></td>
                       <td>{m.csat || "—"}</td>
-                      <td>{m.resolvida || "—"}</td>
-                      <td>
-                        <strong className={m.nota < config.minScore ? "negative" : ""}>{fmt(m.nota)}</strong> / 100
-                      </td>
+                      <td>{m.flag ? <span className="negative">Prioridade</span> : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1033,258 +1438,263 @@ function Monitorias({ records, config }: { records: Monitoria[]; config: Config 
 }
 
 /* =====================================================================
-   PARÂMETROS
+   PARÂMETROS (scorecard do Processo de Monitoria)
    ===================================================================== */
 
-const BLOCK_COLORS = PALETTE;
-
 function Parameters({
-  blocks,
-  setBlocks,
-  config,
+  scorecard,
+  setScorecard,
 }: {
-  blocks: Block[];
-  setBlocks: (blocks: Block[]) => void;
-  config: Config;
+  scorecard: Scorecard;
+  setScorecard: (sc: Scorecard) => void;
 }) {
-  const [tab, setTab] = useState<"edit" | "sim">("edit");
-  const [selectedId, setSelectedId] = useState<number | null>(blocks[0]?.id ?? null);
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  const [samples, setSamples] = useState<Record<number, number>>({});
+  const [tab, setTab] = useState<"params" | "scale" | "sim">("params");
+  const [editing, setEditing] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [sim, setSim] = useState<(number | null)[]>([2, 2, 2, 2, 2]);
+  const [payroll, setPayroll] = useState(false);
 
-  const total = blocks.reduce((sum, b) => sum + b.weight, 0);
-  const diff = 100 - total;
-  const isValid = diff === 0;
-  const selected = blocks.find((b) => b.id === selectedId) ?? blocks[0] ?? null;
-  const colorOf = (id: number) => {
-    const index = blocks.findIndex((b) => b.id === id);
-    return BLOCK_COLORS[(index < 0 ? 0 : index) % BLOCK_COLORS.length];
+  const updateParam = (id: number, patch: Partial<Param>) =>
+    setScorecard({ ...scorecard, params: scorecard.params.map((p) => (p.id === id ? { ...p, ...patch } : p)) });
+
+  const setThreshold = (key: "excellentMin" | "adequateMin" | "attentionMin", value: number) => {
+    const next = { ...scorecard, [key]: value };
+    if (next.excellentMin > next.adequateMin && next.adequateMin > next.attentionMin && next.attentionMin >= 1) {
+      setScorecard(next);
+    }
   };
 
-  const update = (id: number, patch: Partial<Block>) =>
-    setBlocks(blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
-
-  const addBlock = () => {
-    const block: Block = {
-      id: Date.now(),
-      name: "Novo bloco de avaliação",
-      weight: Math.max(0, diff),
-      desc: "Descreva o que este bloco avalia.",
-    };
-    setBlocks([...blocks, block]);
-    setSelectedId(block.id);
-    setConfirmRemove(false);
-    setTab("edit");
+  const reset = () => {
+    setScorecard(DEFAULT_SCORECARD);
+    setConfirmReset(false);
+    setEditing(false);
   };
 
-  const removeBlock = (id: number) => {
-    const remaining = blocks.filter((b) => b.id !== id);
-    setBlocks(remaining);
-    setSelectedId(remaining[0]?.id ?? null);
-    setConfirmRemove(false);
-  };
+  const applicable = sim.filter((s): s is number => s !== null);
+  const obtained = applicable.reduce((a, b) => a + b, 0);
+  const possible = applicable.length * 2;
+  const simTotal = totalFromScores(sim);
+  const simConcept: Concept | null = payroll ? "Crítico" : simTotal === null ? null : conceptOf(simTotal, scorecard);
 
-  const normalize = () => {
-    if (!total) return;
-    let accumulated = 0;
-    setBlocks(
-      blocks.map((b, i) => {
-        if (i === blocks.length - 1) return { ...b, weight: Math.max(0, 100 - accumulated) };
-        const w = Math.round((b.weight / total) * 100);
-        accumulated += w;
-        return { ...b, weight: w };
-      })
-    );
-  };
-
-  const sampleOf = (id: number) => samples[id] ?? 90;
-  const finalScore = total ? blocks.reduce((sum, b) => sum + sampleOf(b.id) * b.weight, 0) / total : 0;
-
-  const statusText = isValid
-    ? "Distribuição completa: os pesos somam 100%."
-    : diff > 0
-    ? `Faltam ${diff}% para completar 100%.`
-    : `Os pesos excedem 100% em ${Math.abs(diff)}%.`;
+  const thresholdOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
   return (
     <main className="content parameters-page">
+      <div className="panel" style={{ marginBottom: 20 }}>
+        <div className="page-actions">
+          <div>
+            <h3>Scorecard {scorecard.version}</h3>
+            <p className="muted">
+              5 parâmetros, cada um vale 0 (não atende), 1 (parcial) ou 2 (atende plenamente). Total de 0 a 10 pontos por ticket.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {editing && (confirmReset ? (
+              <>
+                <button className="secondary-button" onClick={() => setConfirmReset(false)}>Cancelar</button>
+                <button className="danger-button" onClick={reset}>Confirmar restauração</button>
+              </>
+            ) : (
+              <button className="secondary-button" onClick={() => setConfirmReset(true)}>Restaurar padrão V4</button>
+            ))}
+            <button className={editing ? "primary-button" : "secondary-button"} onClick={() => { setEditing(!editing); setConfirmReset(false); }}>
+              {editing ? "Concluir edição" : "Editar scorecard"}
+            </button>
+          </div>
+        </div>
+        {editing && (
+          <div className="notice">
+            Modo de edição: mudanças no scorecard só entram em vigor oficialmente após aprovação da diretoria de atendimento (processo, seção 7).
+          </div>
+        )}
+      </div>
+
       <Tabs
         tabs={[
-          { id: "edit", label: "Blocos e pesos" },
-          { id: "sim", label: "Simulador de nota" },
+          { id: "params", label: "Parâmetros" },
+          { id: "scale", label: "Régua e regras" },
+          { id: "sim", label: "Simulador" },
         ]}
         value={tab}
         onChange={setTab}
       />
 
-      <div className="panel">
-        <div className="page-actions">
-          <div>
-            <h3>Distribuição dos pesos</h3>
-            <p className="muted">{statusText}</p>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            {!isValid && blocks.length > 0 && (
-              <button className="secondary-button" onClick={normalize}>Ajustar proporcionalmente</button>
-            )}
-            <div className={`badge ${isValid ? "ok" : "warn"}`}>Total: {total}%</div>
-          </div>
-        </div>
-        <div className="stack-bar">
-          {blocks.map((b) => (
-            <div
-              key={b.id}
-              className="stack-seg"
-              title={`${b.name}: ${b.weight}%`}
-              style={{ width: `${(b.weight / Math.max(total, 100)) * 100}%`, background: colorOf(b.id) }}
-            />
-          ))}
-        </div>
-        <div className="legend">
-          {blocks.map((b) => (
-            <span key={b.id}>
-              <i className="dot" style={{ background: colorOf(b.id) }} /> {b.name} ({b.weight}%)
-            </span>
-          ))}
-        </div>
-        <p className="muted" style={{ fontSize: 12, marginTop: 14 }}>
-          Observação: a nota final dos dashboards vem da coluna de nota da planilha. Estes pesos servem para definir o modelo de avaliação e para o simulador.
-        </p>
-      </div>
-
-      {tab === "edit" && (
-        <div className="param-layout">
-          <div className="panel">
-            <div className="page-actions" style={{ marginBottom: 14 }}>
-              <h3>Blocos ({blocks.length})</h3>
-              <button className="primary-button" onClick={addBlock}>+ Novo bloco</button>
-            </div>
-            <div className="block-items">
-              {blocks.map((b, index) => (
-                <button
-                  key={b.id}
-                  className={`block-item ${selected && selected.id === b.id ? "active" : ""}`}
-                  onClick={() => {
-                    setSelectedId(b.id);
-                    setConfirmRemove(false);
-                  }}
-                >
-                  <div className="block-item-top">
-                    <span>
-                      <i className="dot" style={{ background: colorOf(b.id) }} /> {index + 1}. {b.name}
-                    </span>
-                    <strong>{b.weight}%</strong>
-                  </div>
-                  <div className="mini-bar">
-                    <div style={{ width: `${clamp(b.weight, 0, 100)}%`, background: colorOf(b.id) }} />
-                  </div>
-                </button>
-              ))}
-              {blocks.length === 0 && <p className="empty">Nenhum bloco ainda. Clique em “+ Novo bloco”.</p>}
-            </div>
-          </div>
-
-          <div className="panel">
-            {!selected ? (
-              <p className="empty">Selecione ou crie um bloco para editar.</p>
-            ) : (
-              <>
-                <div className="page-actions">
-                  <div>
-                    <h3>Editar bloco</h3>
-                    <p className="muted">As alterações são salvas automaticamente.</p>
-                  </div>
-                  {confirmRemove ? (
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button className="secondary-button" onClick={() => setConfirmRemove(false)}>Cancelar</button>
-                      <button className="danger-button" onClick={() => removeBlock(selected.id)}>Confirmar remoção</button>
-                    </div>
+      {tab === "params" && (
+        <div style={{ display: "grid", gap: 16 }}>
+          {scorecard.params.map((p) => (
+            <section key={p.id} className="param-card">
+              <div className="param-head">
+                <span className="param-num">{p.id}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {editing ? (
+                    <input className="input" value={p.name} onChange={(e) => updateParam(p.id, { name: e.target.value })} />
                   ) : (
-                    <button className="danger-button" onClick={() => setConfirmRemove(true)}>Remover bloco</button>
+                    <h4>{p.name}</h4>
+                  )}
+                  {editing ? (
+                    <textarea
+                      className="input"
+                      rows={2}
+                      style={{ marginTop: 8 }}
+                      value={p.evaluates}
+                      onChange={(e) => updateParam(p.id, { evaluates: e.target.value })}
+                    />
+                  ) : (
+                    <p className="muted">{p.evaluates}</p>
                   )}
                 </div>
+                {editing ? (
+                  <label className="check">
+                    <input type="checkbox" checked={p.canBeNA} onChange={(e) => updateParam(p.id, { canBeNA: e.target.checked })} />
+                    pode ser “-”
+                  </label>
+                ) : (
+                  p.canBeNA && <span className="badge ok">pode ser “-”</span>
+                )}
+              </div>
 
-                <div className="editor-section">
-                  <div className="editor-title">1. IDENTIFICAÇÃO</div>
-                  <label className="field-label" style={{ marginTop: 12 }}>NOME DO BLOCO</label>
-                  <input className="input" value={selected.name} onChange={(e) => update(selected.id, { name: e.target.value })} />
-                  <label className="field-label" style={{ marginTop: 14 }}>O QUE ESTE BLOCO AVALIA</label>
-                  <textarea
-                    className="input"
-                    rows={3}
-                    value={selected.desc}
-                    onChange={(e) => update(selected.id, { desc: e.target.value })}
-                  />
-                </div>
-
-                <div className="editor-section">
-                  <div className="editor-title">2. PESO NA NOTA FINAL</div>
-                  <div className="weight-row">
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={selected.weight}
-                      onChange={(e) => update(selected.id, { weight: Number(e.target.value) })}
-                    />
-                    <div className="weight-input">
-                      <input
+              <div className="rubric-grid">
+                {(
+                  [
+                    ["full", "2 pontos · Atende", p.full],
+                    ["partial", "1 ponto · Parcial", p.partial],
+                    ["none", "0 ponto · Não atende", p.none],
+                  ] as const
+                ).map(([key, label, text]) => (
+                  <div key={key} className={`rubric ${key}`}>
+                    <small>{label.toUpperCase()}</small>
+                    {editing ? (
+                      <textarea
                         className="input"
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={selected.weight}
-                        onChange={(e) => update(selected.id, { weight: clamp(Number(e.target.value) || 0, 0, 100) })}
+                        rows={3}
+                        value={text}
+                        onChange={(e) => updateParam(p.id, { [key]: e.target.value } as Partial<Param>)}
                       />
-                      <span>%</span>
-                    </div>
+                    ) : (
+                      <p>{text}</p>
+                    )}
                   </div>
-                  <p className="muted" style={{ fontSize: 13 }}>
-                    Este bloco representa{" "}
-                    <strong style={{ color: "var(--text)" }}>{fmt(total ? (selected.weight / total) * 100 : 0, 0)}%</strong>{" "}
-                    da nota final.
-                    {!isValid && " (Calculado sobre a soma atual dos pesos.)"}
-                  </p>
-                </div>
-              </>
-            )}
-          </div>
+                ))}
+              </div>
+
+              <div className="param-rule">
+                <small>REGRA ESPECÍFICA</small>
+                {editing ? (
+                  <textarea className="input" rows={3} value={p.rule} onChange={(e) => updateParam(p.id, { rule: e.target.value })} />
+                ) : (
+                  <p>{p.rule}</p>
+                )}
+              </div>
+            </section>
+          ))}
         </div>
       )}
 
-      {tab === "sim" && (
-        <div className="panel" style={{ marginTop: 20 }}>
-          <h3>Simulador de nota final</h3>
-          <p className="muted">Informe uma nota de 0 a 100 para cada bloco e veja o resultado ponderado pelos pesos definidos.</p>
-          <div className="sim-grid">
-            {blocks.map((b) => (
-              <div key={b.id} className="sim-item">
-                <span>
-                  <i className="dot" style={{ background: colorOf(b.id) }} /> {b.name}{" "}
-                  <small className="muted">({b.weight}%)</small>
-                </span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={sampleOf(b.id)}
-                  onChange={(e) => setSamples({ ...samples, [b.id]: clamp(Number(e.target.value) || 0, 0, 100) })}
-                />
+      {tab === "scale" && (
+        <>
+          <section className="panel">
+            <h3>Régua de conceitos</h3>
+            <p className="muted">O conceito é sempre calculado a partir da nota total (0 a 10).</p>
+            <div className="concept-cards">
+              {CONCEPTS.map((c) => (
+                <div key={c} className="concept-card" style={{ borderColor: `${CONCEPT_COLORS[c]}66` }}>
+                  <ConceptPill concept={c} />
+                  <strong className="concept-range">{rangeLabel(c, scorecard)}</strong>
+                  <p>{CONCEPT_READING[c]}</p>
+                </div>
+              ))}
+            </div>
+            {editing && (
+              <div className="inline-form">
+                {(
+                  [
+                    ["excellentMin", "EXCELENTE A PARTIR DE"],
+                    ["adequateMin", "ADEQUADO A PARTIR DE"],
+                    ["attentionMin", "ATENÇÃO A PARTIR DE"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <div key={key}>
+                    <label className="field-label">{label}</label>
+                    <select className="input" value={scorecard[key]} onChange={(e) => setThreshold(key, Number(e.target.value))}>
+                      {thresholdOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                ))}
+                <p className="muted" style={{ fontSize: 12, flexBasis: "100%", margin: 0 }}>
+                  Os limites precisam ficar em ordem decrescente (Excelente &gt; Adequado &gt; Atenção). Valores inválidos são ignorados.
+                </p>
               </div>
-            ))}
+            )}
+          </section>
+
+          <section className="panel" style={{ marginTop: 20 }}>
+            <h3>Cálculo da nota</h3>
+            <p className="muted">
+              Soma dos 5 parâmetros (0 a 10). Quando algum parâmetro não se aplica (“-”), a nota é proporcional: pontos obtidos ÷ pontos
+              possíveis × 10, arredondada para o inteiro mais próximo.
+            </p>
+            <div className="rule-block" style={{ marginTop: 12 }}>
+              <strong>Exemplo:</strong> 5 de 6 pontos possíveis = 5 ÷ 6 × 10 = 8,33, que arredonda para <strong>8</strong>.
+            </div>
+            <p className="muted" style={{ fontSize: 12 }}>
+              Quando o resultado cair exatamente em meio ponto (2,5 ou 7,5), a ferramenta arredonda para cima.
+            </p>
+          </section>
+
+          <section className="panel" style={{ marginTop: 20 }}>
+            <h3>Regras gerais da avaliação</h3>
+            <ul className="rules-list">
+              {GENERAL_RULES.map((r) => <li key={r}>{r}</li>)}
+            </ul>
+          </section>
+        </>
+      )}
+
+      {tab === "sim" && (
+        <section className="panel">
+          <h3>Simulador de nota</h3>
+          <p className="muted">Escolha a nota de cada parâmetro e veja o total e o conceito, com as mesmas regras do processo.</p>
+          <div className="sim-grid" style={{ marginTop: 16 }}>
+            {scorecard.params.map((p, i) => {
+              const options: (number | null)[] = p.canBeNA ? [0, 1, 2, null] : [0, 1, 2];
+              return (
+                <div key={p.id} className="sim-item">
+                  <span>{p.id}. {p.name}</span>
+                  <div className="seg">
+                    {options.map((v) => (
+                      <button
+                        key={String(v)}
+                        className={sim[i] === v ? "on" : ""}
+                        onClick={() => setSim(sim.map((s, j) => (j === i ? v : s)))}
+                      >
+                        {v === null ? "-" : v}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
+
+          <label className="check" style={{ marginTop: 16 }}>
+            <input type="checkbox" checked={payroll} onChange={(e) => setPayroll(e.target.checked)} />
+            Prioridade/FLAG rebaixada indevidamente em caso com impacto em folha de pagamento
+          </label>
+
           <div className="sim-result">
-            <span>Nota final ponderada</span>
-            <strong>{fmt(finalScore)} / 100</strong>
-            <span className={finalScore >= config.minScore ? "positive" : "negative"}>
-              {finalScore >= config.minScore ? "Acima" : "Abaixo"} da nota mínima ({config.minScore})
+            <span>
+              {possible === 0 ? "Sem pontos possíveis" : `${obtained} de ${possible} pontos`}
+              {possible > 0 && possible < 10 ? " (proporcional)" : ""}
             </span>
+            <strong>{simTotal === null ? "—" : simTotal} / 10</strong>
+            <ConceptPill concept={simConcept} />
           </div>
-          <p className="muted" style={{ fontSize: 12 }}>
-            Fórmula: soma de (nota do bloco × peso) ÷ soma dos pesos. Se os pesos não somarem 100%, o resultado é normalizado automaticamente.
-          </p>
-        </div>
+          {payroll && (
+            <p className="muted" style={{ fontSize: 12 }}>
+              Exceção do processo: prioridade rebaixada indevidamente em caso de folha leva o ticket direto para Crítico, independentemente do total.
+            </p>
+          )}
+        </section>
       )}
     </main>
   );
@@ -1321,7 +1731,7 @@ function Team({
   const [personTeam, setPersonTeam] = useState(NO_TEAM);
   const [error, setError] = useState("");
 
-  const rows = computeRows(people, records, null, Date.now());
+  const rows = computeRows(people, records, getWindow("Todo o período", Date.now()));
   const realTeams = teamList.filter((t) => t !== NO_TEAM);
 
   const closeModal = () => {
@@ -1404,7 +1814,7 @@ function Team({
             </article>
             <article className="kpi-card">
               <div className="kpi-header"><small>NOTA MÉDIA GERAL</small></div>
-              <div className="kpi-body"><strong>{fmt(weightedScore(rows))}</strong><span>/ 100</span></div>
+              <div className="kpi-body"><strong>{fmt(weightedScore(rows))}</strong><span>/ 10</span></div>
             </article>
           </section>
 
@@ -1521,7 +1931,7 @@ function Team({
                           </select>
                         </td>
                         <td>{a.audits}</td>
-                        <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 100</> : "—"}</td>
+                        <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 10</> : "—"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1548,7 +1958,7 @@ function Team({
                     setTeamName(e.target.value);
                     setError("");
                   }}
-                  placeholder="Ex: Equipe Ametista"
+                  placeholder="Ex: Torre Ametista"
                 />
               </div>
               {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
@@ -1602,33 +2012,46 @@ function Team({
 }
 
 /* =====================================================================
-   RELATÓRIOS
+   RELATÓRIO SEMANAL
    ===================================================================== */
 
 function Reports({
   people,
   records,
   teamList,
-  config,
+  scorecard,
+  goals,
 }: {
   people: Person[];
   records: Monitoria[];
   teamList: string[];
-  config: Config;
+  scorecard: Scorecard;
+  goals: Goals;
 }) {
-  const [period, setPeriod] = useState("Todo o período");
-  const days = PERIODS[period];
-  const now = Date.now();
+  const [period, setPeriod] = useState("Semana anterior");
+  const w = getWindow(period, Date.now());
 
-  const list = records.filter((r) => days === null || r.date === null || r.date >= now - days * DAY);
-  const rows = computeRows(people, records, days, now);
+  const list = records.filter((r) => inCurrent(r, w));
+  const prevList = records.filter((r) => inPrev(r, w));
+  const cs = scored(list);
+  const ps = scored(prevList);
 
-  const resolved = rateOf(list, "resolvida", isYes);
-  const csat = rateOf(list, "csat", isResponded);
-  const below = list.length ? (list.filter((r) => r.nota < config.minScore).length / list.length) * 100 : 0;
+  const avgNow = avg(cs.map((r) => r.nota));
+  const avgPrev = avg(ps.map((r) => r.nota));
+  const csat = csatOf(list);
+  const criticalCount = cs.filter((r) => r.concept === "Crítico").length;
+  const alerts = list
+    .filter((r) => r.flag || r.concept === "Crítico")
+    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
 
-  const byCategory = new Map<string, Monitoria[]>();
-  list.forEach((r) => {
+  const teamOf = new Map(people.map((p) => [norm(p.name), p.team]));
+  const teamRows = teamList.map((t) => {
+    const items = cs.filter((r) => (teamOf.get(norm(r.consultor)) ?? NO_TEAM) === t);
+    return { name: t, count: items.length, score: avg(items.map((r) => r.nota)), counts: conceptCounts(items) };
+  });
+
+  const byCategory = new Map<string, Scored[]>();
+  cs.forEach((r) => {
     const key = r.categoria || "Sem categoria";
     const arr = byCategory.get(key);
     if (arr) arr.push(r);
@@ -1639,69 +2062,134 @@ function Reports({
       name,
       count: items.length,
       score: avg(items.map((i) => i.nota)),
-      resolved: rateOf(items, "resolvida", isYes),
+      critical: items.filter((i) => i.concept === "Crítico").length,
     }))
     .sort((a, b) => b.count - a.count);
+
+  const periodNote =
+    period === "Semana anterior"
+      ? `${fmtDate(w.from)} a ${fmtDate(w.to - DAY)}`
+      : period === "Todo o período"
+      ? "histórico completo"
+      : period.toLowerCase();
 
   return (
     <main className="content">
       <div className="page-actions" style={{ marginBottom: 16 }}>
-        <Dropdown label="PERÍODO" value={period} options={Object.keys(PERIODS)} onChange={setPeriod} />
+        <Dropdown label="PERÍODO" value={period} options={PERIOD_NAMES} onChange={setPeriod} />
+        <span className="muted-text">Período do relatório: {periodNote}</span>
       </div>
 
       <section className="kpis" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
         <article className="kpi-card">
-          <div className="kpi-header"><small>NOTA MÉDIA</small></div>
-          <div className="kpi-body"><strong>{fmt(avg(list.map((r) => r.nota)))}</strong><span>/ 100</span></div>
-          <p>{list.length.toLocaleString("pt-BR")} monitorias</p>
+          <div className="kpi-header"><small>TICKETS AVALIADOS</small></div>
+          <div className="kpi-body"><strong>{cs.length.toLocaleString("pt-BR")}</strong></div>
+          <p>{list.length - cs.length > 0 ? `${list.length - cs.length} desconsiderado(s)` : "100% pontuados"}</p>
         </article>
         <article className="kpi-card">
-          <div className="kpi-header"><small>ABAIXO DA NOTA MÍNIMA</small></div>
-          <div className="kpi-body"><strong>{fmt(below)}%</strong></div>
-          <p>nota mínima: {config.minScore}</p>
+          <div className="kpi-header">
+            <small>NOTA MÉDIA (DE 10)</small>
+            <Delta value={ps.length ? avgNow - avgPrev : null} unit=" pts" />
+          </div>
+          <div className="kpi-body"><strong>{fmt(avgNow)}</strong></div>
+          <p>{ps.length ? `vs. ${fmt(avgPrev)} no período anterior` : "sem período anterior"}</p>
         </article>
         <article className="kpi-card">
-          <div className="kpi-header"><small>TAXA DE RESOLUÇÃO</small></div>
-          <div className="kpi-body"><strong>{resolved === null ? "—" : `${fmt(resolved)}%`}</strong></div>
-          <p>coluna “Resolvida?”</p>
+          <div className="kpi-header">
+            <small>CSAT</small>
+            {csat.rate !== null && (
+              <span className={csat.rate >= goals.csat ? "positive" : "negative"}>
+                {csat.rate >= goals.csat ? "na meta" : "abaixo da meta"}
+              </span>
+            )}
+          </div>
+          <div className="kpi-body"><strong>{csat.rate === null ? "—" : `${fmt(csat.rate)}%`}</strong></div>
+          <p>meta {goals.csat}%</p>
         </article>
         <article className="kpi-card">
-          <div className="kpi-header"><small>CSAT RESPONDIDO</small></div>
-          <div className="kpi-body"><strong>{csat === null ? "—" : `${fmt(csat)}%`}</strong></div>
-          <p>coluna “Status CSAT”</p>
+          <div className="kpi-header"><small>TICKETS CRÍTICOS</small></div>
+          <div className="kpi-body"><strong>{criticalCount}</strong></div>
+          <p>{cs.length ? `${fmt((criticalCount / cs.length) * 100)}% dos avaliados` : "—"}</p>
         </article>
       </section>
 
-      <div className="panel">
-        <h3>Por time</h3>
+      <div className="grid-2">
+        <section className="panel">
+          <h3>Distribuição por conceito</h3>
+          <ConceptDistribution list={cs} />
+        </section>
+        <section className="panel">
+          <h3>Média por parâmetro</h3>
+          <ParamBars list={cs} scorecard={scorecard} />
+        </section>
+      </div>
+
+      <section className="panel" style={{ marginBottom: 24 }}>
+        <h3>Conceitos por time</h3>
         <div className="table-wrap" style={{ marginTop: 12 }}>
           <table>
             <thead>
               <tr>
                 <th>TIME</th>
-                <th>COLABORADORES</th>
-                <th>MONITORIAS</th>
+                <th>AVALIADOS</th>
                 <th>NOTA MÉDIA</th>
+                {CONCEPTS.map((c) => <th key={c}>{c.toUpperCase()}</th>)}
               </tr>
             </thead>
             <tbody>
-              {teamList.map((t) => {
-                const members = rows.filter((r) => r.team === t);
-                return (
-                  <tr key={t}>
-                    <td><strong>{t}</strong></td>
-                    <td>{members.length}</td>
-                    <td>{members.reduce((sum, a) => sum + a.audits, 0)}</td>
-                    <td>{members.some((a) => a.audits) ? fmt(weightedScore(members)) : "—"}</td>
-                  </tr>
-                );
-              })}
+              {teamRows.map((t) => (
+                <tr key={t.name}>
+                  <td><strong>{t.name}</strong></td>
+                  <td>{t.count}</td>
+                  <td>{t.count ? fmt(t.score) : "—"}</td>
+                  {CONCEPTS.map((c) => (
+                    <td key={c}>
+                      {t.counts[c]} <span className="muted-text">({t.count ? fmt((t.counts[c] / t.count) * 100, 0) : 0}%)</span>
+                    </td>
+                  ))}
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
 
-      <div className="panel" style={{ marginTop: 20 }}>
+      <section className="panel" style={{ marginBottom: 24 }}>
+        <h3>Alertas para a liderança</h3>
+        <p className="muted">Prioridade possivelmente rebaixada e tickets Críticos (nota de {rangeLabel("Crítico", scorecard)}).</p>
+        {alerts.length === 0 ? (
+          <p className="empty">Nenhum alerta no período.</p>
+        ) : (
+          <div className="table-wrap" style={{ marginTop: 12 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>SEMANA</th>
+                  <th>CONSULTOR</th>
+                  <th>TICKET</th>
+                  <th>NOTA</th>
+                  <th>ALERTA</th>
+                  <th>PONTO DE ATENÇÃO</th>
+                </tr>
+              </thead>
+              <tbody>
+                {alerts.slice(0, 30).map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.week || "—"}</td>
+                    <td><strong>{r.consultor}</strong></td>
+                    <td>{r.ticket ? <span className="ticket">#{r.ticket}</span> : "—"}</td>
+                    <td>{r.nota === null ? "—" : fmt(r.nota, 0)}</td>
+                    <td>{r.flag ? "Prioridade possivelmente rebaixada" : "Ticket Crítico"}</td>
+                    <td className="wrap-cell">{r.attention || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
         <h3>Por categoria</h3>
         {categoryRows.length === 0 ? (
           <p className="empty">Sem monitorias no período.</p>
@@ -1711,9 +2199,9 @@ function Reports({
               <thead>
                 <tr>
                   <th>CATEGORIA</th>
-                  <th>MONITORIAS</th>
+                  <th>AVALIADOS</th>
                   <th>NOTA MÉDIA</th>
-                  <th>RESOLVIDAS</th>
+                  <th>CRÍTICOS</th>
                 </tr>
               </thead>
               <tbody>
@@ -1722,14 +2210,14 @@ function Reports({
                     <td><strong>{c.name}</strong></td>
                     <td>{c.count}</td>
                     <td>{fmt(c.score)}</td>
-                    <td>{c.resolved === null ? "—" : `${fmt(c.resolved)}%`}</td>
+                    <td>{c.critical}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-      </div>
+      </section>
     </main>
   );
 }
@@ -1739,31 +2227,26 @@ function Reports({
    ===================================================================== */
 
 function Settings({
-  config,
-  setConfig,
-  setBlocks,
+  goals,
+  setGoals,
   sheet,
   reload,
   sheetUrlSetting,
   setSheetUrlSetting,
 }: {
-  config: Config;
-  setConfig: (config: Config) => void;
-  setBlocks: (blocks: Block[]) => void;
+  goals: Goals;
+  setGoals: (goals: Goals) => void;
   sheet: SheetState;
   reload: () => void;
   sheetUrlSetting: string;
   setSheetUrlSetting: (url: string) => void;
 }) {
-  const profileNames = Object.keys(MARKET_PROFILES);
-  const [selected, setSelected] = useState(profileNames.includes(config.profile) ? config.profile : profileNames[0]);
-  const [minScore, setMinScore] = useState(String(config.minScore));
-  const [targetAudits, setTargetAudits] = useState(String(config.targetAudits));
+  const [csat, setCsat] = useState(String(goals.csat));
+  const [agreement, setAgreement] = useState(String(goals.agreement));
+  const [feedback, setFeedback] = useState(String(goals.feedback));
   const [message, setMessage] = useState("");
   const [urlInput, setUrlInput] = useState(sheetUrlSetting);
   const [urlError, setUrlError] = useState("");
-
-  const profile = MARKET_PROFILES[selected];
 
   const connect = () => {
     const value = urlInput.trim();
@@ -1782,27 +2265,16 @@ function Settings({
     setSheetUrlSetting("");
   };
 
-  const applyProfile = () => {
-    setBlocks(profile.blocks.map((b, i) => ({ ...b, id: Date.now() + i })));
-    setConfig({ profile: selected, minScore: profile.minScore, targetAudits: profile.targetAudits });
-    setMinScore(String(profile.minScore));
-    setTargetAudits(String(profile.targetAudits));
-    setMessage(`Perfil "${selected}" aplicado: nota mínima, meta de auditorias e blocos de parâmetros foram atualizados.`);
-  };
-
-  const save = () => {
-    const min = Number(minScore);
-    const target = Number(targetAudits);
-    if (!(min >= 0 && min <= 100) || !(target >= 1)) {
-      setMessage("Verifique os valores: a nota mínima vai de 0 a 100 e a meta deve ser de pelo menos 1 auditoria.");
+  const saveGoals = () => {
+    const c = Number(csat);
+    const a = Number(agreement);
+    const f = Number(feedback);
+    if ([c, a, f].some((n) => !(n >= 0 && n <= 100))) {
+      setMessage("Verifique os valores: cada meta deve ficar entre 0 e 100.");
       return;
     }
-    const matchesProfile =
-      MARKET_PROFILES[config.profile] &&
-      MARKET_PROFILES[config.profile].minScore === min &&
-      MARKET_PROFILES[config.profile].targetAudits === target;
-    setConfig({ profile: matchesProfile ? config.profile : "Personalizado", minScore: min, targetAudits: target });
-    setMessage("Configurações salvas com sucesso!");
+    setGoals({ csat: c, agreement: a, feedback: f });
+    setMessage("Metas salvas com sucesso!");
   };
 
   const statusLabel =
@@ -1813,6 +2285,8 @@ function Settings({
       : sheet.status === "error"
       ? "Com erro"
       : "Não conectada (modo demonstração)";
+
+  const paramMissing = sheet.status === "ok" && sheet.mapping.filter((m) => /^p[1-5]$/.test(m.field) && !m.header).length > 0;
 
   return (
     <main className="content">
@@ -1843,7 +2317,7 @@ function Settings({
         </div>
         {urlError && <p className="negative" style={{ margin: "10px 0 0" }}>{urlError}</p>}
         {ENV_URL && !sheetUrlSetting && (
-          <p className="muted" style={{ fontSize: 12 }}>Usando o link padrão configurado no Vercel (VITE_SHEET_CSV_URL).</p>
+          <p className="muted" style={{ fontSize: 12 }}>Usando o link padrão configurado na Vercel (VITE_SHEET_CSV_URL).</p>
         )}
         {sheet.status === "error" && <div className="notice">{sheet.message}</div>}
 
@@ -1852,7 +2326,7 @@ function Settings({
           <ol className="steps">
             <li>Na planilha: <b>Arquivo → Compartilhar → Publicar na web</b>.</li>
             <li>Escolha a <b>aba</b> com as monitorias e o formato <b>Valores separados por vírgula (.csv)</b>, e clique em <b>Publicar</b>.</li>
-            <li>Copie o link gerado e cole no campo acima. Para valer para todos os usuários, cadastre o mesmo link no Vercel como <b>VITE_SHEET_CSV_URL</b> e faça um novo deploy.</li>
+            <li>Copie o link gerado e cole no campo acima. Para valer para todos os usuários, cadastre o mesmo link na Vercel como <b>VITE_SHEET_CSV_URL</b> e faça um novo deploy.</li>
           </ol>
           <p className="muted" style={{ fontSize: 12, margin: 0 }}>
             Atenção: quem tiver o link consegue ler os dados da aba publicada. Não publique nada que não possa ser visto por terceiros.
@@ -1862,6 +2336,11 @@ function Settings({
         {sheet.status === "ok" && (
           <div style={{ marginTop: 16 }}>
             <div className="editor-title">COLUNAS RECONHECIDAS</div>
+            {paramMissing && (
+              <div className="notice">
+                Algumas colunas dos 5 parâmetros não foram encontradas. Sem elas, a ferramenta usa só a nota total e não mostra a média por parâmetro.
+              </div>
+            )}
             <div className="table-wrap" style={{ marginTop: 8 }}>
               <table>
                 <thead>
@@ -1891,61 +2370,26 @@ function Settings({
       </div>
 
       <div className="panel" style={{ marginTop: 20 }}>
-        <div className="page-actions">
-          <div>
-            <h3>Perfil padrão de mercado</h3>
-            <p className="muted">Carregue um modelo pronto de critérios, pesos e metas e depois ajuste ao seu negócio.</p>
-          </div>
-          <div className="badge ok">Perfil ativo: {config.profile}</div>
-        </div>
-
-        <div className="inline-form" style={{ marginTop: 16 }}>
-          <div style={{ flex: 1 }}>
-            <label className="field-label">PERFIL</label>
-            <select className="input" value={selected} onChange={(e) => setSelected(e.target.value)}>
-              {profileNames.map((p) => <option key={p}>{p}</option>)}
-            </select>
-          </div>
-          <button className="primary-button" onClick={applyProfile}>Aplicar perfil</button>
-        </div>
-
-        <div className="rule-block" style={{ marginTop: 14 }}>
-          <strong>{selected}</strong>
-          <p className="muted" style={{ fontSize: 12, margin: "4px 0 8px" }}>{profile.description}</p>
-          <p style={{ fontSize: 13, margin: 0 }}>
-            Nota mínima: <strong>{profile.minScore}</strong> · Meta mensal: <strong>{profile.targetAudits} auditorias</strong>
-          </p>
-          <ul className="profile-blocks">
-            {profile.blocks.map((b) => (
-              <li key={b.name}>{b.name} <span className="muted">({b.weight}%)</span></li>
-            ))}
-          </ul>
-        </div>
-        <p className="muted" style={{ fontSize: 12 }}>
-          Valores de exemplo para ponto de partida, não são referências oficiais de mercado. Ao aplicar, os blocos atuais da página Parâmetros são substituídos.
-        </p>
-      </div>
-
-      <div className="panel" style={{ marginTop: 20 }}>
-        <h3>Metas e alertas</h3>
-        <p className="muted">Ajuste os valores aplicados em toda a plataforma.</p>
+        <h3>Metas do processo</h3>
+        <p className="muted">Indicadores da seção 8 do Processo de Monitoria. Os pesos e a régua ficam na página Parâmetros.</p>
         <div style={{ marginTop: 16, display: "grid", gap: 16 }}>
           <div className="rule-block">
-            <strong>Nota mínima</strong>
-            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
-              Monitorias abaixo desta nota contam como desvio no Dashboard e nos Relatórios.
-            </p>
-            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={minScore} onChange={(e) => setMinScore(e.target.value)} />
+            <strong>CSAT (meta, %)</strong>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>Indicador de resultado. Usado nos cards de CSAT do Dashboard e do relatório.</p>
+            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={csat} onChange={(e) => setCsat(e.target.value)} />
           </div>
           <div className="rule-block">
-            <strong>Meta mensal de monitorias por consultor</strong>
-            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
-              Volume necessário para garantir a representatividade estatística da operação.
-            </p>
-            <input className="input" style={{ width: 120 }} type="number" min={1} value={targetAudits} onChange={(e) => setTargetAudits(e.target.value)} />
+            <strong>Concordância IA × analista (meta, %)</strong>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>Referência para a liberação do agente de IA (fase 06). Ainda não calculada pela ferramenta.</p>
+            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={agreement} onChange={(e) => setAgreement(e.target.value)} />
+          </div>
+          <div className="rule-block">
+            <strong>Feedbacks aplicados no prazo (meta, %)</strong>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>Execução do ciclo pela liderança (até sexta-feira). Ainda não calculada pela ferramenta.</p>
+            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={feedback} onChange={(e) => setFeedback(e.target.value)} />
           </div>
         </div>
-        <button className="primary-button" style={{ marginTop: 20 }} onClick={save}>Salvar configurações</button>
+        <button className="primary-button" style={{ marginTop: 20 }} onClick={saveGoals}>Salvar metas</button>
         {message && <div className="notice success" style={{ marginTop: 14 }}>{message}</div>}
       </div>
     </main>
@@ -1953,52 +2397,76 @@ function Settings({
 }
 
 /* =====================================================================
-   DETALHE (drawer)
+   SCORECARD DO CONSULTOR (drawer)
    ===================================================================== */
 
 function AuditDrawer({
   person,
   records,
-  config,
+  scorecard,
   close,
 }: {
   person: Person | null;
   records: Monitoria[];
-  config: Config;
+  scorecard: Scorecard;
   close: () => void;
 }) {
-  const list = records
-    .filter((r) => !person || norm(r.consultor) === norm(person.name))
-    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0))
-    .slice(0, 10);
+  const own = records.filter((r) => !person || norm(r.consultor) === norm(person.name));
+  const cs = scored(own);
+  const latest = [...own].sort((a, b) => (b.date ?? 0) - (a.date ?? 0)).slice(0, 10);
 
   return (
     <div className="drawer-overlay" onClick={close}>
-      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 520, display: "flex", flexDirection: "column", padding: 0 }}>
+      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 560, display: "flex", flexDirection: "column", padding: 0 }}>
         <div className="drawer-header" style={{ padding: 20, borderBottom: "1px solid var(--line)", marginBottom: 0 }}>
-          <h3>{person ? person.name : "Últimas monitorias"}</h3>
+          <div>
+            <h3>{person ? `Scorecard de ${person.name}` : "Scorecard geral"}</h3>
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>{person ? person.team : "Todos os consultores"}</p>
+          </div>
           <button onClick={close} className="secondary-button">Fechar</button>
         </div>
         <div className="drawer-body" style={{ padding: 20, overflowY: "auto", flex: 1 }}>
-          <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-            {person ? `${person.team} · ` : ""}as 10 monitorias mais recentes
-          </p>
-          {list.length === 0 ? (
+          {own.length === 0 ? (
             <p className="empty">Nenhuma monitoria registrada.</p>
           ) : (
-            <div className="block-items">
-              {list.map((r) => (
-                <div key={r.id} className="rule-block" style={{ lineHeight: 1.7 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                    <strong>{person ? r.categoria || "Sem categoria" : r.consultor}</strong>
-                    <strong className={r.nota < config.minScore ? "negative" : "positive"}>{fmt(r.nota)}</strong>
+            <>
+              <div className="kpi-body" style={{ marginTop: 0 }}>
+                <strong>{fmt(avg(cs.map((r) => r.nota)))}</strong>
+                <span>/ 10 · nota média em {cs.length} monitorias</span>
+              </div>
+
+              <div className="editor-title" style={{ marginTop: 20 }}>DISTRIBUIÇÃO POR CONCEITO</div>
+              <ConceptDistribution list={cs} />
+
+              <div className="editor-title" style={{ marginTop: 24 }}>MÉDIA POR PARÂMETRO</div>
+              <ParamBars list={cs} scorecard={scorecard} />
+
+              <div className="editor-title" style={{ marginTop: 24 }}>ÚLTIMAS MONITORIAS</div>
+              <div className="block-items" style={{ marginTop: 10 }}>
+                {latest.map((r) => (
+                  <div key={r.id} className="rule-block" style={{ lineHeight: 1.7 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                      <strong>{person ? r.categoria || "Sem categoria" : r.consultor}</strong>
+                      <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        {r.disregarded ? <span className="muted-text">Desconsiderado</span> : <strong>{fmt(r.nota ?? 0, 0)}</strong>}
+                        <ConceptPill concept={r.concept} />
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 12, margin: 0 }}>
+                      {[r.week, r.ticket && `#${r.ticket}`, r.csat && `CSAT: ${r.csat}`, r.flag && "Prioridade possivelmente rebaixada"]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </div>
+                    {r.scores && (
+                      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                        {r.scores.map((s, i) => <ScoreCell key={i} value={s} />)}
+                      </div>
+                    )}
+                    {r.attention && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{r.attention}</div>}
                   </div>
-                  <div className="muted" style={{ fontSize: 12, margin: 0 }}>
-                    {[r.week, r.ticket && `#${r.ticket}`, r.resolvida && `Resolvida: ${r.resolvida}`, r.csat].filter(Boolean).join(" · ")}
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -2017,14 +2485,22 @@ export default function App() {
 
   const [registered, setRegistered] = usePersistentState<Person[]>("qualita:v2:people", []);
   const [teams, setTeams] = usePersistentState<string[]>("qualita:v2:teams", []);
-  const [blocks, setBlocks] = usePersistentState<Block[]>("qualita:v1:blocks", DEFAULT_BLOCKS);
-  const [config, setConfig] = usePersistentState<Config>("qualita:v1:config", DEFAULT_CONFIG);
+  const [scorecard, setScorecard] = usePersistentState<Scorecard>("qualita:v3:scorecard", DEFAULT_SCORECARD);
+  const [goals, setGoals] = usePersistentState<Goals>("qualita:v3:goals", DEFAULT_GOALS);
   const [sheetUrlSetting, setSheetUrlSetting] = usePersistentState<string>("qualita:v2:sheetUrl", "");
 
   const sheetUrl = resolveSheetUrl(sheetUrlSetting || ENV_URL);
   const [sheet, reload] = useSheet(sheetUrl);
   const isDemo = sheet.status === "demo";
-  const records = sheet.records;
+
+  /* O conceito vem da planilha quando existir; senão é calculado pela régua do scorecard */
+  const records = useMemo(
+    () =>
+      sheet.records.map((r) =>
+        r.nota === null || r.concept ? r : { ...r, concept: conceptOf(r.nota, scorecard) }
+      ),
+    [sheet.records, scorecard]
+  );
 
   const people = useMemo(
     () => buildPeople(isDemo ? [...DEMO_PEOPLE, ...registered] : registered, records),
@@ -2065,10 +2541,17 @@ export default function App() {
         <Header page={page} />
         {page !== "settings" && <SourceBanner sheet={sheet} reload={reload} goSettings={() => setPage("settings")} />}
         {page === "dashboard" && (
-          <Dashboard people={people} records={records} teamList={teamList} config={config} openAudit={openAudit} />
+          <Dashboard
+            people={people}
+            records={records}
+            teamList={teamList}
+            scorecard={scorecard}
+            goals={goals}
+            openAudit={openAudit}
+          />
         )}
-        {page === "monitorias" && <Monitorias records={records} config={config} />}
-        {page === "parameters" && <Parameters blocks={blocks} setBlocks={setBlocks} config={config} />}
+        {page === "monitorias" && <Monitorias records={records} />}
+        {page === "parameters" && <Parameters scorecard={scorecard} setScorecard={setScorecard} />}
         {page === "team" && (
           <Team
             people={people}
@@ -2080,12 +2563,13 @@ export default function App() {
             openAudit={openAudit}
           />
         )}
-        {page === "reports" && <Reports people={people} records={records} teamList={teamList} config={config} />}
+        {page === "reports" && (
+          <Reports people={people} records={records} teamList={teamList} scorecard={scorecard} goals={goals} />
+        )}
         {page === "settings" && (
           <Settings
-            config={config}
-            setConfig={setConfig}
-            setBlocks={setBlocks}
+            goals={goals}
+            setGoals={setGoals}
             sheet={sheet}
             reload={reload}
             sheetUrlSetting={sheetUrlSetting}
@@ -2093,7 +2577,7 @@ export default function App() {
           />
         )}
       </div>
-      {auditOpen && <AuditDrawer person={auditPerson} records={records} config={config} close={() => setAuditOpen(false)} />}
+      {auditOpen && <AuditDrawer person={auditPerson} records={records} scorecard={scorecard} close={() => setAuditOpen(false)} />}
     </div>
   );
 }
