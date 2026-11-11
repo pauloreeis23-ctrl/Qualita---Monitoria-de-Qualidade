@@ -19,8 +19,9 @@ type Config = { profile: string; minScore: number; targetAudits: number };
 
 /* ============================== Dados iniciais ============================== */
 
-const TEAMS = ["Equipe Safira", "Equipe Esmeralda", "Equipe Rubi"];
+const DEFAULT_TEAMS = ["Equipe Safira", "Equipe Esmeralda", "Equipe Rubi"];
 const PALETTE = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1"];
+const BLOCK_COLORS = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1", "#4fa3a5", "#d9776a"];
 
 const INITIAL_AGENTS: Agent[] = [
   { id: 1, name: "Marina Costa", team: "Equipe Safira", audits: 48, score: 96.8, trend: 2.4, initials: "MC", color: "#826be0" },
@@ -131,6 +132,11 @@ function weightedScore(list: Agent[]) {
   return list.reduce((sum, a) => sum + a.score * a.audits, 0) / total;
 }
 
+/* Junta os times cadastrados com qualquer time que ainda apareça em algum colaborador */
+function unionTeams(teams: string[], agents: Agent[]) {
+  return Array.from(new Set([...teams, ...agents.map((a) => a.team)]));
+}
+
 /* ============================== Componentes base ============================== */
 
 function Icon({ size = 18 }: { name?: string; size?: number }) {
@@ -178,6 +184,26 @@ function Dropdown({
   );
 }
 
+function Tabs<T extends string>({
+  tabs,
+  value,
+  onChange,
+}: {
+  tabs: { id: T; label: string }[];
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="tabs">
+      {tabs.map((t) => (
+        <button key={t.id} className={t.id === value ? "active" : ""} onClick={() => onChange(t.id)}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => void }) {
   const items = [
     ["dashboard", "Dashboard"],
@@ -220,8 +246,8 @@ function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => vo
 function Header({ page }: { page: string }) {
   const pages: Record<string, [string, string]> = {
     dashboard: ["Dashboard gerencial", "Acompanhe o desempenho da sua operação em tempo real."],
-    parameters: ["Construtor de parâmetros", "Configure critérios, pesos dinâmicos e regras organizacionais."],
-    team: ["Gestão de equipe", "Gerencie colaboradores, equipes e indicadores individuais."],
+    parameters: ["Construtor de parâmetros", "Defina os critérios da avaliação e quanto cada um pesa na nota final."],
+    team: ["Gestão de equipe", "Cadastre times e colaboradores e acompanhe os indicadores de cada um."],
     reports: ["Relatórios analíticos", "Explore tendências e exporte dados consolidados da operação."],
     settings: ["Configurações e Governança", "Gerencie perfis de mercado, metas e preferências."],
   };
@@ -247,10 +273,12 @@ function Header({ page }: { page: string }) {
 
 function Dashboard({
   agents,
+  teamList,
   config,
   openAudit,
 }: {
   agents: Agent[];
+  teamList: string[];
   config: Config;
   openAudit: (agent?: Agent) => void;
 }) {
@@ -259,7 +287,7 @@ function Dashboard({
   const [consultant, setConsultant] = useState(ALL_CONSULTANTS);
 
   const meta = PERIODS[period];
-  const teamOptions = [ALL_TEAMS, ...Array.from(new Set(agents.map((a) => a.team)))];
+  const teamOptions = [ALL_TEAMS, ...teamList];
   const consultantOptions = [
     ALL_CONSULTANTS,
     ...agents.filter((a) => team === ALL_TEAMS || a.team === team).map((a) => a.name),
@@ -387,38 +415,50 @@ function Parameters({
   setBlocks: (blocks: Block[]) => void;
   config: Config;
 }) {
-  const [newTitle, setNewTitle] = useState("");
-  const [newWeight, setNewWeight] = useState("15");
+  const [tab, setTab] = useState<"edit" | "sim">("edit");
+  const [selectedId, setSelectedId] = useState<number | null>(blocks[0]?.id ?? null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [samples, setSamples] = useState<Record<number, number>>({});
 
-  const totalWeight = blocks.reduce((sum, b) => sum + b.weight, 0);
-  const isValid = totalWeight === 100;
+  const total = blocks.reduce((sum, b) => sum + b.weight, 0);
+  const diff = 100 - total;
+  const isValid = diff === 0;
+  const selected = blocks.find((b) => b.id === selectedId) ?? blocks[0] ?? null;
+  const colorOf = (id: number) => {
+    const index = blocks.findIndex((b) => b.id === id);
+    return BLOCK_COLORS[(index < 0 ? 0 : index) % BLOCK_COLORS.length];
+  };
 
   const update = (id: number, patch: Partial<Block>) =>
     setBlocks(blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
 
-  const addBlock = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-    setBlocks([
-      ...blocks,
-      {
-        id: Date.now(),
-        name: newTitle.trim(),
-        weight: clamp(Number(newWeight) || 0, 0, 100),
-        desc: "Critério personalizado da organização.",
-      },
-    ]);
-    setNewTitle("");
+  const addBlock = () => {
+    const block: Block = {
+      id: Date.now(),
+      name: "Novo bloco de avaliação",
+      weight: Math.max(0, diff),
+      desc: "Descreva o que este bloco avalia.",
+    };
+    setBlocks([...blocks, block]);
+    setSelectedId(block.id);
+    setConfirmRemove(false);
+    setTab("edit");
+  };
+
+  const removeBlock = (id: number) => {
+    const remaining = blocks.filter((b) => b.id !== id);
+    setBlocks(remaining);
+    setSelectedId(remaining[0]?.id ?? null);
+    setConfirmRemove(false);
   };
 
   const normalize = () => {
-    if (!totalWeight) return;
+    if (!total) return;
     let accumulated = 0;
     setBlocks(
       blocks.map((b, i) => {
         if (i === blocks.length - 1) return { ...b, weight: Math.max(0, 100 - accumulated) };
-        const w = Math.round((b.weight / totalWeight) * 100);
+        const w = Math.round((b.weight / total) * 100);
         accumulated += w;
         return { ...b, weight: w };
       })
@@ -426,219 +466,459 @@ function Parameters({
   };
 
   const sampleOf = (id: number) => samples[id] ?? 90;
-  const finalScore = totalWeight ? blocks.reduce((sum, b) => sum + sampleOf(b.id) * b.weight, 0) / totalWeight : 0;
+  const finalScore = total ? blocks.reduce((sum, b) => sum + sampleOf(b.id) * b.weight, 0) / total : 0;
+
+  const statusText = isValid
+    ? "Distribuição completa: os pesos somam 100%."
+    : diff > 0
+    ? `Faltam ${diff}% para completar 100%.`
+    : `Os pesos excedem 100% em ${Math.abs(diff)}%.`;
 
   return (
     <main className="content parameters-page">
+      <Tabs
+        tabs={[
+          { id: "edit", label: "Blocos e pesos" },
+          { id: "sim", label: "Simulador de nota" },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
+
+      {/* Resumo da distribuição de pesos (aparece nas duas abas) */}
       <div className="panel">
         <div className="page-actions">
           <div>
-            <h3>Construtor Modular de Parâmetros</h3>
-            <p className="muted">Edite nomes, descrições e pesos. A nota final de cada auditoria usa a média ponderada destes blocos.</p>
+            <h3>Distribuição dos pesos</h3>
+            <p className="muted">{statusText}</p>
           </div>
-          <div className={`badge ${isValid ? "ok" : "warn"}`}>
-            Peso total: {totalWeight}% {!isValid && "(deve somar 100%)"}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {!isValid && blocks.length > 0 && (
+              <button className="secondary-button" onClick={normalize}>Ajustar proporcionalmente</button>
+            )}
+            <div className={`badge ${isValid ? "ok" : "warn"}`}>Total: {total}%</div>
           </div>
         </div>
+        <div className="stack-bar">
+          {blocks.map((b) => (
+            <div
+              key={b.id}
+              className="stack-seg"
+              title={`${b.name}: ${b.weight}%`}
+              style={{ width: `${(b.weight / Math.max(total, 100)) * 100}%`, background: colorOf(b.id) }}
+            />
+          ))}
+        </div>
+        <div className="legend">
+          {blocks.map((b) => (
+            <span key={b.id}>
+              <i className="dot" style={{ background: colorOf(b.id) }} /> {b.name} ({b.weight}%)
+            </span>
+          ))}
+        </div>
+      </div>
 
-        {!isValid && (
-          <div className="notice">
-            A soma dos pesos precisa ser 100%.{" "}
-            <button className="link-button" onClick={normalize}>Ajustar proporcionalmente</button>
+      {tab === "edit" && (
+        <div className="param-layout">
+          {/* Coluna esquerda: lista de blocos */}
+          <div className="panel">
+            <div className="page-actions" style={{ marginBottom: 14 }}>
+              <h3>Blocos ({blocks.length})</h3>
+              <button className="primary-button" onClick={addBlock}>+ Novo bloco</button>
+            </div>
+            <div className="block-items">
+              {blocks.map((b, index) => (
+                <button
+                  key={b.id}
+                  className={`block-item ${selected && selected.id === b.id ? "active" : ""}`}
+                  onClick={() => {
+                    setSelectedId(b.id);
+                    setConfirmRemove(false);
+                  }}
+                >
+                  <div className="block-item-top">
+                    <span>
+                      <i className="dot" style={{ background: colorOf(b.id) }} /> {index + 1}. {b.name}
+                    </span>
+                    <strong>{b.weight}%</strong>
+                  </div>
+                  <div className="mini-bar">
+                    <div style={{ width: `${clamp(b.weight, 0, 100)}%`, background: colorOf(b.id) }} />
+                  </div>
+                </button>
+              ))}
+              {blocks.length === 0 && <p className="empty">Nenhum bloco ainda. Clique em “+ Novo bloco”.</p>}
+            </div>
           </div>
-        )}
 
-        <div className="block-list">
-          {blocks.map((b, idx) => (
-            <div key={b.id} className="rule-block">
-              <div className="block-fields">
-                <input
-                  className="input"
-                  value={b.name}
-                  onChange={(e) => update(b.id, { name: e.target.value })}
-                  aria-label={`Nome do bloco ${idx + 1}`}
-                />
-                <input
-                  className="input small"
-                  value={b.desc}
-                  onChange={(e) => update(b.id, { desc: e.target.value })}
-                  aria-label={`Descrição do bloco ${idx + 1}`}
-                />
-              </div>
-              <div className="block-weight">
-                <label className="field-label">PESO (%)</label>
+          {/* Coluna direita: edição do bloco selecionado */}
+          <div className="panel">
+            {!selected ? (
+              <p className="empty">Selecione ou crie um bloco para editar.</p>
+            ) : (
+              <>
+                <div className="page-actions">
+                  <div>
+                    <h3>Editar bloco</h3>
+                    <p className="muted">As alterações são salvas automaticamente.</p>
+                  </div>
+                  {confirmRemove ? (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button className="secondary-button" onClick={() => setConfirmRemove(false)}>Cancelar</button>
+                      <button className="danger-button" onClick={() => removeBlock(selected.id)}>Confirmar remoção</button>
+                    </div>
+                  ) : (
+                    <button className="danger-button" onClick={() => setConfirmRemove(true)}>Remover bloco</button>
+                  )}
+                </div>
+
+                <div className="editor-section">
+                  <div className="editor-title">1. IDENTIFICAÇÃO</div>
+                  <label className="field-label" style={{ marginTop: 12 }}>NOME DO BLOCO</label>
+                  <input className="input" value={selected.name} onChange={(e) => update(selected.id, { name: e.target.value })} />
+                  <label className="field-label" style={{ marginTop: 14 }}>O QUE ESTE BLOCO AVALIA</label>
+                  <textarea
+                    className="input"
+                    rows={3}
+                    value={selected.desc}
+                    onChange={(e) => update(selected.id, { desc: e.target.value })}
+                  />
+                </div>
+
+                <div className="editor-section">
+                  <div className="editor-title">2. PESO NA NOTA FINAL</div>
+                  <div className="weight-row">
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={selected.weight}
+                      onChange={(e) => update(selected.id, { weight: Number(e.target.value) })}
+                    />
+                    <div className="weight-input">
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={selected.weight}
+                        onChange={(e) => update(selected.id, { weight: clamp(Number(e.target.value) || 0, 0, 100) })}
+                      />
+                      <span>%</span>
+                    </div>
+                  </div>
+                  <p className="muted" style={{ fontSize: 13 }}>
+                    Este bloco representa{" "}
+                    <strong style={{ color: "var(--text)" }}>{fmt(total ? (selected.weight / total) * 100 : 0, 0)}%</strong>{" "}
+                    da nota final.
+                    {!isValid && " (Calculado sobre a soma atual dos pesos.)"}
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "sim" && (
+        <div className="panel" style={{ marginTop: 20 }}>
+          <h3>Simulador de nota final</h3>
+          <p className="muted">Informe uma nota de 0 a 100 para cada bloco e veja o resultado ponderado pelos pesos definidos.</p>
+          <div className="sim-grid">
+            {blocks.map((b) => (
+              <div key={b.id} className="sim-item">
+                <span>
+                  <i className="dot" style={{ background: colorOf(b.id) }} /> {b.name}{" "}
+                  <small className="muted">({b.weight}%)</small>
+                </span>
                 <input
                   className="input"
                   type="number"
                   min={0}
                   max={100}
-                  value={b.weight}
-                  onChange={(e) => update(b.id, { weight: clamp(Number(e.target.value) || 0, 0, 100) })}
+                  value={sampleOf(b.id)}
+                  onChange={(e) => setSamples({ ...samples, [b.id]: clamp(Number(e.target.value) || 0, 0, 100) })}
                 />
               </div>
-              <button className="secondary-button" onClick={() => setBlocks(blocks.filter((x) => x.id !== b.id))}>
-                Remover
-              </button>
-            </div>
-          ))}
-          {blocks.length === 0 && <p className="empty">Nenhum bloco cadastrado. Adicione o primeiro abaixo.</p>}
-        </div>
-
-        <form onSubmit={addBlock} className="inline-form">
-          <div style={{ flex: 1 }}>
-            <label className="field-label">NOVO CRITÉRIO / BLOCO</label>
-            <input className="input" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Ex: Clareza na Escrita" />
+            ))}
           </div>
-          <div style={{ width: 110 }}>
-            <label className="field-label">PESO (%)</label>
-            <input className="input" type="number" min={0} max={100} value={newWeight} onChange={(e) => setNewWeight(e.target.value)} />
+          <div className="sim-result">
+            <span>Nota final ponderada</span>
+            <strong>{fmt(finalScore)} / 100</strong>
+            <span className={finalScore >= config.minScore ? "positive" : "negative"}>
+              {finalScore >= config.minScore ? "Acima" : "Abaixo"} da nota mínima ({config.minScore})
+            </span>
           </div>
-          <button type="submit" className="primary-button">Adicionar bloco</button>
-        </form>
-      </div>
-
-      <div className="panel" style={{ marginTop: 20 }}>
-        <h3>Simulador de nota final</h3>
-        <p className="muted">Informe uma nota de 0 a 100 para cada bloco e veja o resultado ponderado pelos pesos acima.</p>
-        <div className="sim-grid">
-          {blocks.map((b) => (
-            <div key={b.id} className="sim-item">
-              <span>{b.name} <small className="muted">({b.weight}%)</small></span>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                max={100}
-                value={sampleOf(b.id)}
-                onChange={(e) => setSamples({ ...samples, [b.id]: clamp(Number(e.target.value) || 0, 0, 100) })}
-              />
-            </div>
-          ))}
+          <p className="muted" style={{ fontSize: 12 }}>
+            Fórmula: soma de (nota do bloco × peso) ÷ soma dos pesos. Se os pesos não somarem 100%, o resultado é normalizado automaticamente.
+          </p>
         </div>
-        <div className="sim-result">
-          <span>Nota final ponderada</span>
-          <strong>{fmt(finalScore)} / 100</strong>
-          <span className={finalScore >= config.minScore ? "positive" : "negative"}>
-            {finalScore >= config.minScore ? "Acima" : "Abaixo"} da nota mínima ({config.minScore})
-          </span>
-        </div>
-        <p className="muted" style={{ fontSize: 12 }}>
-          Fórmula: soma de (nota do bloco × peso) ÷ soma dos pesos. Se os pesos não somarem 100%, o resultado é normalizado automaticamente.
-        </p>
-      </div>
+      )}
     </main>
   );
 }
 
-/* ============================== Equipe ============================== */
+/* ============================== Equipe (Times + Colaboradores) ============================== */
 
 function Team({
   agents,
   setAgents,
+  teams,
+  setTeams,
   openAudit,
 }: {
   agents: Agent[];
   setAgents: (agents: Agent[]) => void;
+  teams: string[];
+  setTeams: (teams: string[]) => void;
   openAudit: (agent?: Agent) => void;
 }) {
-  const [showModal, setShowModal] = useState(false);
-  const [name, setName] = useState("");
-  const [team, setTeam] = useState(TEAMS[0]);
-  const [error, setError] = useState("");
+  const [view, setView] = useState<"teams" | "people">("teams");
+  const [modal, setModal] = useState<"none" | "team" | "person">("none");
+  const [teamFilter, setTeamFilter] = useState(ALL_TEAMS);
   const [success, setSuccess] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  const [teamName, setTeamName] = useState("");
+  const [personName, setPersonName] = useState("");
+  const [personTeam, setPersonTeam] = useState("");
+  const [error, setError] = useState("");
+
+  const teamList = unionTeams(teams, agents);
 
   const closeModal = () => {
-    setShowModal(false);
+    setModal("none");
     setError("");
-    setName("");
+    setTeamName("");
+    setPersonName("");
   };
 
-  const addAgent = (e: React.FormEvent) => {
+  const openTeamModal = () => {
+    setSuccess("");
+    setModal("team");
+  };
+
+  const openPersonModal = () => {
+    setSuccess("");
+    setPersonTeam(teamFilter !== ALL_TEAMS ? teamFilter : teamList[0] ?? "");
+    setModal("person");
+  };
+
+  const addTeam = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanName = name.trim().replace(/\s+/g, " ");
-    if (!cleanName) {
+    const clean = teamName.trim().replace(/\s+/g, " ");
+    if (!clean) {
+      setError("Informe o nome do time.");
+      return;
+    }
+    if (teamList.some((t) => t.toLowerCase() === clean.toLowerCase())) {
+      setError("Já existe um time com esse nome.");
+      return;
+    }
+    setTeams([...teams, clean]);
+    setSuccess(`Time "${clean}" cadastrado com sucesso.`);
+    closeModal();
+  };
+
+  const deleteTeam = (name: string) => {
+    setTeams(teams.filter((t) => t !== name));
+    setConfirmDelete(null);
+    setSuccess(`Time "${name}" excluído.`);
+  };
+
+  const addPerson = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = personName.trim().replace(/\s+/g, " ");
+    if (!clean) {
       setError("Informe o nome do colaborador.");
       return;
     }
-    if (agents.some((a) => a.name.toLowerCase() === cleanName.toLowerCase())) {
+    if (!personTeam) {
+      setError("Selecione um time.");
+      return;
+    }
+    if (agents.some((a) => a.name.toLowerCase() === clean.toLowerCase())) {
       setError("Já existe um colaborador com esse nome.");
       return;
     }
     const newMember: Agent = {
       id: Date.now(),
-      name: cleanName,
-      team,
+      name: clean,
+      team: personTeam,
       audits: 0,
       score: 0,
       trend: 0,
-      initials: cleanName.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase(),
+      initials: clean.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase(),
       color: PALETTE[agents.length % PALETTE.length],
     };
     setAgents([...agents, newMember]);
-    setSuccess(`${cleanName} foi cadastrado(a) em ${team}.`);
+    setSuccess(`${clean} foi cadastrado(a) em ${personTeam}.`);
     closeModal();
   };
 
-  const sorted = [...agents].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  const teamStats = teamList.map((name) => {
+    const members = agents.filter((a) => a.team === name);
+    return {
+      name,
+      members,
+      audits: members.reduce((sum, a) => sum + a.audits, 0),
+      avg: members.some((a) => a.audits) ? weightedScore(members) : null,
+    };
+  });
+
+  const people = agents
+    .filter((a) => teamFilter === ALL_TEAMS || a.team === teamFilter)
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 
   return (
     <main className="content">
-      <div className="page-actions">
-        <h3>Colaboradores e Equipes ({agents.length})</h3>
-        <button className="primary-button" onClick={() => { setSuccess(""); setShowModal(true); }}>
-          + Cadastrar novo colaborador
-        </button>
-      </div>
+      <Tabs
+        tabs={[
+          { id: "teams", label: `Times (${teamList.length})` },
+          { id: "people", label: `Colaboradores (${agents.length})` },
+        ]}
+        value={view}
+        onChange={(v) => {
+          setView(v);
+          setSuccess("");
+        }}
+      />
 
-      {success && <div className="notice success">{success}</div>}
+      {success && <div className="notice success" style={{ marginTop: 0, marginBottom: 16 }}>{success}</div>}
 
-      <div className="panel" style={{ marginTop: 16 }}>
-        <table>
-          <thead>
-            <tr>
-              <th>COLABORADOR</th>
-              <th>TIME</th>
-              <th>AUDITORIAS</th>
-              <th>NOTA MÉDIA</th>
-              <th>EVOLUÇÃO</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((a) => (
-              <tr key={a.id} onClick={() => openAudit(a)} style={{ cursor: "pointer" }}>
-                <td>
-                  <div className="agent">
-                    <span className="avatar" style={{ background: a.color }}>{a.initials}</span>
-                    <strong>{a.name}</strong>
+      {/* ---------- DASH DE TIMES ---------- */}
+      {view === "teams" && (
+        <>
+          <section className="kpis">
+            <article className="kpi-card">
+              <div className="kpi-header"><small>TIMES ATIVOS</small></div>
+              <div className="kpi-body"><strong>{teamList.length}</strong></div>
+            </article>
+            <article className="kpi-card">
+              <div className="kpi-header"><small>COLABORADORES</small></div>
+              <div className="kpi-body"><strong>{agents.length}</strong></div>
+            </article>
+            <article className="kpi-card">
+              <div className="kpi-header"><small>NOTA MÉDIA GERAL</small></div>
+              <div className="kpi-body"><strong>{fmt(weightedScore(agents))}</strong><span>/ 100</span></div>
+            </article>
+          </section>
+
+          <div className="page-actions" style={{ marginBottom: 16 }}>
+            <h3>Times</h3>
+            <button className="primary-button" onClick={openTeamModal}>+ Cadastrar novo time</button>
+          </div>
+
+          {teamStats.length === 0 ? (
+            <div className="panel"><p className="empty">Nenhum time cadastrado. Clique em “+ Cadastrar novo time”.</p></div>
+          ) : (
+            <div className="team-grid">
+              {teamStats.map((t) => (
+                <div key={t.name} className="team-card">
+                  <div className="team-card-head">
+                    <h4>{t.name}</h4>
+                    <span className="badge ok">{t.members.length} {t.members.length === 1 ? "pessoa" : "pessoas"}</span>
                   </div>
-                </td>
-                <td>{a.team}</td>
-                <td>{a.audits}</td>
-                <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 100</> : "—"}</td>
-                <td>
-                  {a.audits ? <span className={a.trend >= 0 ? "positive" : "negative"}>{fmtTrend(a.trend)}</span> : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                  <div className="avatar-stack">
+                    {t.members.slice(0, 6).map((m) => (
+                      <span key={m.id} className="avatar" style={{ background: m.color }} title={m.name}>{m.initials}</span>
+                    ))}
+                    {t.members.length === 0 && <span className="muted" style={{ fontSize: 13 }}>Sem colaboradores ainda</span>}
+                  </div>
+                  <div className="team-metrics">
+                    <div><small>AUDITORIAS</small><strong>{t.audits}</strong></div>
+                    <div><small>NOTA MÉDIA</small><strong>{t.avg === null ? "—" : fmt(t.avg)}</strong></div>
+                  </div>
+                  <div className="team-actions">
+                    <button
+                      className="secondary-button"
+                      onClick={() => {
+                        setTeamFilter(t.name);
+                        setView("people");
+                        setSuccess("");
+                      }}
+                    >
+                      Ver colaboradores
+                    </button>
+                    {t.members.length === 0 &&
+                      (confirmDelete === t.name ? (
+                        <button className="danger-button" onClick={() => deleteTeam(t.name)}>Confirmar</button>
+                      ) : (
+                        <button className="danger-button" onClick={() => setConfirmDelete(t.name)}>Excluir</button>
+                      ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
-      {showModal && (
+      {/* ---------- DASH DE COLABORADORES ---------- */}
+      {view === "people" && (
+        <>
+          <div className="page-actions" style={{ marginBottom: 16 }}>
+            <Dropdown label="TIME" value={teamFilter} options={[ALL_TEAMS, ...teamList]} onChange={setTeamFilter} />
+            <button className="primary-button" onClick={openPersonModal}>+ Cadastrar novo colaborador</button>
+          </div>
+
+          <div className="panel">
+            {people.length === 0 ? (
+              <p className="empty">Nenhum colaborador neste filtro.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>COLABORADOR</th>
+                    <th>TIME</th>
+                    <th>AUDITORIAS</th>
+                    <th>NOTA MÉDIA</th>
+                    <th>EVOLUÇÃO</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {people.map((a) => (
+                    <tr key={a.id} onClick={() => openAudit(a)} style={{ cursor: "pointer" }}>
+                      <td>
+                        <div className="agent">
+                          <span className="avatar" style={{ background: a.color }}>{a.initials}</span>
+                          <strong>{a.name}</strong>
+                        </div>
+                      </td>
+                      <td>{a.team}</td>
+                      <td>{a.audits}</td>
+                      <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 100</> : "—"}</td>
+                      <td>
+                        {a.audits ? <span className={a.trend >= 0 ? "positive" : "negative"}>{fmtTrend(a.trend)}</span> : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ---------- Painel: novo time ---------- */}
+      {modal === "team" && (
         <div className="drawer-overlay" onClick={closeModal}>
           <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
-            <h3>Cadastrar novo colaborador</h3>
-            <p className="muted" style={{ fontSize: 13 }}>Informe o nome e o time do novo membro.</p>
-            <form onSubmit={addAgent} style={{ marginTop: 20, display: "grid", gap: 14 }}>
+            <h3>Cadastrar novo time</h3>
+            <p className="muted" style={{ fontSize: 13 }}>Depois de criado, o time aparece nos filtros e no cadastro de colaboradores.</p>
+            <form onSubmit={addTeam} style={{ marginTop: 20, display: "grid", gap: 14 }}>
               <div>
-                <label className="field-label">NOME COMPLETO</label>
-                <input className="input" autoFocus value={name} onChange={(e) => { setName(e.target.value); setError(""); }} placeholder="Ex: Juliana Souza" />
-              </div>
-              <div>
-                <label className="field-label">TIME</label>
-                <select className="input" value={team} onChange={(e) => setTeam(e.target.value)}>
-                  {TEAMS.map((t) => <option key={t}>{t}</option>)}
-                </select>
+                <label className="field-label">NOME DO TIME</label>
+                <input
+                  className="input"
+                  autoFocus
+                  value={teamName}
+                  onChange={(e) => {
+                    setTeamName(e.target.value);
+                    setError("");
+                  }}
+                  placeholder="Ex: Equipe Ametista"
+                />
               </div>
               {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
               <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
@@ -649,17 +929,59 @@ function Team({
           </div>
         </div>
       )}
+
+      {/* ---------- Painel: novo colaborador ---------- */}
+      {modal === "person" && (
+        <div className="drawer-overlay" onClick={closeModal}>
+          <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
+            <h3>Cadastrar novo colaborador</h3>
+            <p className="muted" style={{ fontSize: 13 }}>Informe o nome e o time do novo membro.</p>
+            {teamList.length === 0 ? (
+              <>
+                <div className="notice" style={{ marginTop: 20 }}>Cadastre ao menos um time antes de adicionar colaboradores.</div>
+                <button className="secondary-button" style={{ marginTop: 14 }} onClick={closeModal}>Fechar</button>
+              </>
+            ) : (
+              <form onSubmit={addPerson} style={{ marginTop: 20, display: "grid", gap: 14 }}>
+                <div>
+                  <label className="field-label">NOME COMPLETO</label>
+                  <input
+                    className="input"
+                    autoFocus
+                    value={personName}
+                    onChange={(e) => {
+                      setPersonName(e.target.value);
+                      setError("");
+                    }}
+                    placeholder="Ex: Juliana Souza"
+                  />
+                </div>
+                <div>
+                  <label className="field-label">TIME</label>
+                  <select className="input" value={personTeam} onChange={(e) => setPersonTeam(e.target.value)}>
+                    {teamList.map((t) => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
+                <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+                  <button type="button" className="secondary-button" style={{ flex: 1 }} onClick={closeModal}>Cancelar</button>
+                  <button type="submit" className="primary-button" style={{ flex: 1 }}>Salvar</button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
 
 /* ============================== Relatórios ============================== */
 
-function Reports({ agents, config }: { agents: Agent[]; config: Config }) {
+function Reports({ agents, teamList, config }: { agents: Agent[]; teamList: string[]; config: Config }) {
   const totalAudits = agents.reduce((sum, a) => sum + a.audits, 0);
   const avg = weightedScore(agents);
   const below = agents.filter((a) => a.audits > 0 && a.score < config.minScore).length;
-  const teams = Array.from(new Set(agents.map((a) => a.team)));
 
   return (
     <main className="content">
@@ -691,7 +1013,7 @@ function Reports({ agents, config }: { agents: Agent[]; config: Config }) {
             </tr>
           </thead>
           <tbody>
-            {teams.map((t) => {
+            {teamList.map((t) => {
               const members = agents.filter((a) => a.team === t);
               return (
                 <tr key={t}>
@@ -848,8 +1170,11 @@ export default function App() {
   const [auditAgent, setAuditAgent] = useState<Agent | null>(null);
 
   const [agents, setAgents] = usePersistentState<Agent[]>("qualita:v1:agents", INITIAL_AGENTS);
+  const [teams, setTeams] = usePersistentState<string[]>("qualita:v1:teams", DEFAULT_TEAMS);
   const [blocks, setBlocks] = usePersistentState<Block[]>("qualita:v1:blocks", DEFAULT_BLOCKS);
   const [config, setConfig] = usePersistentState<Config>("qualita:v1:config", DEFAULT_CONFIG);
+
+  const teamList = unionTeams(teams, agents);
 
   const openAudit = (agent?: Agent) => {
     setAuditAgent(agent ?? null);
@@ -861,10 +1186,12 @@ export default function App() {
       <Sidebar page={page} setPage={setPage} />
       <div className="workspace">
         <Header page={page} />
-        {page === "dashboard" && <Dashboard agents={agents} config={config} openAudit={openAudit} />}
+        {page === "dashboard" && <Dashboard agents={agents} teamList={teamList} config={config} openAudit={openAudit} />}
         {page === "parameters" && <Parameters blocks={blocks} setBlocks={setBlocks} config={config} />}
-        {page === "team" && <Team agents={agents} setAgents={setAgents} openAudit={openAudit} />}
-        {page === "reports" && <Reports agents={agents} config={config} />}
+        {page === "team" && (
+          <Team agents={agents} setAgents={setAgents} teams={teams} setTeams={setTeams} openAudit={openAudit} />
+        )}
+        {page === "reports" && <Reports agents={agents} teamList={teamList} config={config} />}
         {page === "settings" && <Settings config={config} setConfig={setConfig} setBlocks={setBlocks} />}
       </div>
       {auditOpen && <AuditDrawer agent={auditAgent} close={() => setAuditOpen(false)} />}
