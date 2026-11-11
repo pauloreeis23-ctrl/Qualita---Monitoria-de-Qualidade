@@ -60,6 +60,7 @@ type SheetState = {
   skipped: number;
   scaleNote: string;
   mapping: FieldMapping[];
+  authExpired: boolean;
 };
 
 type Win = { from: number; to: number; prevFrom: number; prevTo: number; hasPrev: boolean };
@@ -428,8 +429,8 @@ const FIELDS: { field: string; label: string; keys: string[] }[] = [
   { field: "ticket", label: "ID do ticket", keys: ["id ticket", "ticket", "protocolo", "chamado"] },
   { field: "csat", label: "CSAT", keys: ["status csat", "csat"] },
   { field: "time", label: "Time / Torre", keys: ["time", "equipe", "torre"] },
-  { field: "alerta", label: "Alerta de prioridade", keys: ["alerta", "alerta prioridade", "prioridade rebaixada"] },
-  { field: "atencao", label: "Ponto de atenção", keys: ["ponto de atencao", "pontos de atencao"] },
+  { field: "alerta", label: "Alerta de prioridade", keys: ["alerta", "alertas", "alerta prioridade", "prioridade rebaixada"] },
+  { field: "atencao", label: "Ponto de atenção", keys: ["ponto de atencao", "pontos de atencao", "ponto atencao", "pontos atencao"] },
 ];
 
 function findCol(headers: string[], keys: readonly string[]): number {
@@ -483,7 +484,11 @@ function parseScoreCell(value: string): number | null {
 const NO_ALERT = ["nao", "n", "-", "0", "false", "nenhum", "ok", "sem alerta"];
 
 function recordsFromCSV(text: string) {
-  const rows = parseCSV(text);
+  return recordsFromRows(parseCSV(text));
+}
+
+/* rows[0] = cabeçalhos; demais linhas = dados. Serve para CSV e para tabelas do Supabase. */
+function recordsFromRows(rows: string[][]) {
   const keysOf = (field: string) => FIELDS.find((f) => f.field === field)!.keys;
   const paramFields = ["p1", "p2", "p3", "p4", "p5"];
 
@@ -559,7 +564,8 @@ function recordsFromCSV(text: string) {
       scores: disregarded ? null : scores,
       nota,
       concept: disregarded ? null : parseConcept(conceptText),
-      flag: alertText !== "" && !NO_ALERT.includes(alertText),
+      /* Só conta como "prioridade possivelmente rebaixada"; TICKET_CRITICO e REVISAR_P2_P3... têm tratamento próprio */
+      flag: /rebaix/.test(alertText) || (alertText !== "" && !NO_ALERT.includes(alertText) && !/critic|revisar/.test(alertText)),
       disregarded,
       attention: get(idx.atencao),
     });
@@ -675,39 +681,180 @@ const DEMO_STATE: SheetState = {
   skipped: 0,
   scaleNote: "",
   mapping: [],
+  authExpired: false,
 };
 
 /* =====================================================================
-   HOOK DA PLANILHA
+   SUPABASE (leitura via REST + login por e-mail e senha) E HOOK DE DADOS
    ===================================================================== */
 
-function useSheet(url: string) {
+/* A chave "publishable" foi feita para ficar no navegador: o que protege os dados são as políticas (RLS)
+   do Supabase. NUNCA coloque aqui a chave "secret" ou "service_role". */
+const SB_URL: string = String((import.meta as any).env?.VITE_SUPABASE_URL ?? "https://xkrlnvksgouijbwvtphq.supabase.co")
+  .trim()
+  .replace(/\/+$/, "")
+  .replace(/\/rest\/v1$/, "");
+const SB_KEY: string = String(
+  (import.meta as any).env?.VITE_SUPABASE_KEY ?? "sb_publishable_3jHVyCvqdY-aU_L9VfmvIA_nV2P9SOo"
+).trim();
+const SB_DEFAULT_TABLE = "monitorias";
+
+type SbSession = { access_token: string; refresh_token: string; expires_at: number; email: string };
+
+type DataSource = { key: string; load: (() => Promise<string[][]>) | null };
+
+class AuthExpiredError extends Error {}
+
+const SB_NETWORK_ERROR = "Não foi possível falar com o Supabase. Confira a internet e a URL do projeto.";
+
+function sbSessionFrom(data: any, fallbackEmail: string): SbSession {
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: data.expires_at ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600),
+    email: data.user?.email ?? fallbackEmail,
+  };
+}
+
+async function sbSignIn(email: string, password: string): Promise<SbSession> {
+  let res: Response;
+  try {
+    res = await fetch(`${SB_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { apikey: SB_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch {
+    throw new Error(SB_NETWORK_ERROR);
+  }
+  const data = await res.json().catch(() => ({} as any));
+  if (!res.ok) {
+    const raw = String(data.error_description ?? data.msg ?? data.message ?? "");
+    if (/invalid login credentials/i.test(raw)) throw new Error("E-mail ou senha incorretos.");
+    if (/not confirmed/i.test(raw)) {
+      throw new Error("Esse e-mail ainda não foi confirmado. No Supabase, confirme o usuário em Authentication > Users.");
+    }
+    throw new Error(raw || "Não foi possível entrar.");
+  }
+  return sbSessionFrom(data, email);
+}
+
+async function sbRefresh(session: SbSession): Promise<SbSession> {
+  let res: Response;
+  try {
+    res = await fetch(`${SB_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: SB_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: session.refresh_token }),
+    });
+  } catch {
+    throw new Error(SB_NETWORK_ERROR);
+  }
+  if (!res.ok) throw new AuthExpiredError("Sua sessão expirou. Entre novamente.");
+  return sbSessionFrom(await res.json(), session.email);
+}
+
+/* Devolve sempre um token válido, renovando a sessão quando está perto de expirar */
+function makeTokenGetter(session: SbSession, onRefresh: (s: SbSession) => void) {
+  let current = session;
+  return async () => {
+    if (current.expires_at - 60 > Date.now() / 1000) return current.access_token;
+    current = await sbRefresh(current);
+    onRefresh(current);
+    return current.access_token;
+  };
+}
+
+/* Lê a tabela inteira (em páginas de 1.000) e devolve no mesmo formato de um CSV: linha 0 = cabeçalhos */
+async function sbFetchRows(table: string, getToken: () => Promise<string>): Promise<string[][]> {
+  const pageSize = 1000;
+  const all: Record<string, unknown>[] = [];
+  let order = "&order=id.asc"; // dá ordem estável entre páginas; se a tabela não tiver "id", tenta sem ordem
+  let offset = 0;
+
+  while (offset < 200000) {
+    const token = await getToken();
+    let res: Response;
+    try {
+      res = await fetch(
+        `${SB_URL}/rest/v1/${encodeURIComponent(table)}?select=*&limit=${pageSize}&offset=${offset}${order}`,
+        { headers: { apikey: SB_KEY, Authorization: `Bearer ${token}`, Accept: "application/json" }, cache: "no-store" }
+      );
+    } catch {
+      throw new Error(SB_NETWORK_ERROR);
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({} as any));
+      const code = String(body.code ?? "");
+      const message = String(body.message ?? "");
+      if (res.status === 400 && order && /does not exist|42703/.test(`${code} ${message}`)) {
+        order = "";
+        continue;
+      }
+      if (res.status === 401) throw new AuthExpiredError("Sua sessão expirou. Entre novamente.");
+      if (res.status === 404 || code === "PGRST205") {
+        throw new Error(`Tabela “${table}” não encontrada no Supabase. Confira o nome em Configurações.`);
+      }
+      if (res.status === 403 || code === "42501") {
+        throw new Error("Sem permissão para ler a tabela. Falta uma política de leitura (RLS) para usuários logados.");
+      }
+      throw new Error(message || `O Supabase respondeu com erro ${res.status}.`);
+    }
+    const page = (await res.json()) as Record<string, unknown>[];
+    if (page.length === 0) break;
+    all.push(...page);
+    offset += page.length;
+  }
+
+  if (all.length === 0) {
+    throw new Error(
+      `A tabela “${table}” não retornou nenhuma linha. Se ela tem dados, falta uma política de leitura (RLS) para usuários logados.`
+    );
+  }
+  const headers = Array.from(new Set(all.slice(0, 50).flatMap((r) => Object.keys(r))));
+  const cell = (v: unknown) => (v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+  return [headers, ...all.map((r) => headers.map((h) => cell(r[h])))];
+}
+
+async function fetchCsvRows(url: string): Promise<string[][]> {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(
+      `O Google respondeu com erro ${res.status}. Confira se a planilha está publicada na web ou compartilhada como “qualquer pessoa com o link”.`
+    );
+  }
+  const text = await res.text();
+  if (/^\s*<(!doctype|html)/i.test(text)) {
+    throw new Error("O link devolveu uma página (login) em vez dos dados. Publique a planilha na web em formato CSV.");
+  }
+  return parseCSV(text);
+}
+
+function useSheet(source: DataSource) {
   const [state, setState] = useState<SheetState>(
-    url ? { ...DEMO_STATE, status: "loading", records: [] } : DEMO_STATE
+    source.load ? { ...DEMO_STATE, status: "loading", records: [] } : DEMO_STATE
   );
   const requestId = useRef(0);
+  const loaderRef = useRef(source.load);
+  loaderRef.current = source.load;
 
   const load = useCallback(async () => {
     const id = ++requestId.current;
-    if (!url) {
+    const fn = loaderRef.current;
+    if (!fn) {
       setState(DEMO_STATE);
       return;
     }
-    setState((s) => ({ ...s, status: "loading", message: "", records: s.status === "ok" ? s.records : [] }));
+    setState((s) => ({
+      ...s,
+      status: "loading",
+      message: "",
+      authExpired: false,
+      records: s.status === "ok" ? s.records : [],
+    }));
     try {
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) {
-        throw new Error(
-          `O Google respondeu com erro ${res.status}. Confira se a planilha está publicada na web ou compartilhada como “qualquer pessoa com o link”.`
-        );
-      }
-      const text = await res.text();
-      if (/^\s*<(!doctype|html)/i.test(text)) {
-        throw new Error(
-          "O link devolveu uma página (login) em vez dos dados. Publique a planilha na web em formato CSV ou compartilhe como “qualquer pessoa com o link”."
-        );
-      }
-      const result = recordsFromCSV(text);
+      const rows = await fn();
+      const result = recordsFromRows(rows);
       if (id !== requestId.current) return;
       setState({
         status: "ok",
@@ -717,18 +864,20 @@ function useSheet(url: string) {
         skipped: result.skipped,
         scaleNote: result.scaleNote,
         mapping: result.mapping,
+        authExpired: false,
       });
     } catch (err) {
       if (id !== requestId.current) return;
       const message =
         err instanceof TypeError
-          ? "Não foi possível acessar a planilha (permissão ou bloqueio de rede). Confirme que ela está publicada na web em formato CSV."
+          ? "Não foi possível acessar a fonte de dados (permissão ou bloqueio de rede)."
           : err instanceof Error
           ? err.message
-          : "Erro desconhecido ao ler a planilha.";
-      setState((s) => ({ ...s, status: "error", message }));
+          : "Erro desconhecido ao ler os dados.";
+      setState((s) => ({ ...s, status: "error", message, authExpired: err instanceof AuthExpiredError }));
     }
-  }, [url]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source.key]);
 
   useEffect(() => {
     load();
@@ -984,7 +1133,17 @@ function WeeklyEvolution({ list }: { list: Monitoria[] }) {
   );
 }
 
-function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => void }) {
+function Sidebar({
+  page,
+  setPage,
+  userEmail,
+  onSignOut,
+}: {
+  page: string;
+  setPage: (val: string) => void;
+  userEmail?: string;
+  onSignOut?: () => void;
+}) {
   const items = [
     ["dashboard", "Dashboard"],
     ["monitorias", "Monitorias"],
@@ -1020,6 +1179,12 @@ function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => vo
           <span>Central de atendimento</span>
         </div>
       </div>
+      {userEmail && (
+        <div className="sidebar-user">
+          <span title={userEmail}>{userEmail}</span>
+          {onSignOut && <button className="link-button" onClick={onSignOut}>Sair</button>}
+        </div>
+      )}
     </aside>
   );
 }
@@ -1055,28 +1220,39 @@ function SourceBanner({
   sheet,
   reload,
   goSettings,
+  onLogin,
+  label,
 }: {
   sheet: SheetState;
   reload: () => void;
   goSettings: () => void;
+  onLogin?: () => void;
+  label: string;
 }) {
   if (sheet.status === "demo") {
     return (
       <div className="notice info source-banner">
         <span>
-          <strong>Modo demonstração:</strong> os números abaixo são fictícios. Conecte a sua planilha para ver os dados reais.
+          <strong>Modo demonstração:</strong>{" "}
+          {onLogin
+            ? "os números abaixo são fictícios. Entre para ver os dados reais."
+            : "os números abaixo são fictícios. Conecte a fonte de dados para ver os dados reais."}
         </span>
-        <button className="secondary-button" onClick={goSettings}>Conectar planilha</button>
+        {onLogin ? (
+          <button className="secondary-button" onClick={onLogin}>Entrar</button>
+        ) : (
+          <button className="secondary-button" onClick={goSettings}>Configurações</button>
+        )}
       </div>
     );
   }
   if (sheet.status === "loading") {
-    return <div className="notice info source-banner">Carregando dados da planilha…</div>;
+    return <div className="notice info source-banner">Carregando dados…</div>;
   }
   if (sheet.status === "error") {
     return (
       <div className="notice source-banner">
-        <span><strong>Não consegui ler a planilha.</strong> {sheet.message}</span>
+        <span><strong>Não consegui ler os dados.</strong> {sheet.message}</span>
         <span style={{ display: "flex", gap: 8 }}>
           <button className="secondary-button" onClick={reload}>Tentar de novo</button>
           <button className="secondary-button" onClick={goSettings}>Ver configurações</button>
@@ -1087,7 +1263,7 @@ function SourceBanner({
   return (
     <div className="notice success source-banner">
       <span>
-        <strong>Planilha conectada:</strong> {sheet.records.length.toLocaleString("pt-BR")} linhas
+        <strong>Conectado ao {label}:</strong> {sheet.records.length.toLocaleString("pt-BR")} linhas
         {sheet.syncedAt ? ` · atualizado às ${fmtTime(sheet.syncedAt)}` : ""}
         {sheet.skipped > 0 ? ` · ${sheet.skipped} linhas ignoradas (sem consultor ou nota)` : ""}
         {sheet.scaleNote ? ` · ${sheet.scaleNote}` : ""}
@@ -2226,43 +2402,111 @@ function Reports({
    CONFIGURAÇÕES
    ===================================================================== */
 
+function LoginScreen({
+  notice,
+  onSignedIn,
+  onDemo,
+}: {
+  notice: string;
+  onSignedIn: (session: SbSession) => void;
+  onDemo: () => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      onSignedIn(await sbSignIn(email.trim(), password));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Não foi possível entrar.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="login-wrap">
+      <form className="login-card" onSubmit={submit}>
+        <div className="brand" style={{ marginBottom: 20 }}>
+          <div className="logo-mark">Q</div>
+          <div>
+            <strong>Qualitá</strong>
+            <span>MONITORIA</span>
+          </div>
+        </div>
+        <h2>Entrar</h2>
+        <p className="muted">Use o e-mail e a senha cadastrados para você. Os dados de desempenho são de acesso restrito.</p>
+        {notice && <div className="notice">{notice}</div>}
+        <label className="field-label" style={{ marginTop: 18 }}>E-MAIL</label>
+        <input
+          className="input"
+          type="email"
+          autoFocus
+          autoComplete="username"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <label className="field-label" style={{ marginTop: 14 }}>SENHA</label>
+        <input
+          className="input"
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {error && <p className="negative" style={{ margin: "12px 0 0" }}>{error}</p>}
+        <button className="primary-button" type="submit" disabled={busy || !email || !password} style={{ width: "100%", marginTop: 18 }}>
+          {busy ? "Entrando…" : "Entrar"}
+        </button>
+        <button type="button" className="link-button" onClick={onDemo} style={{ marginTop: 14 }}>
+          Ver modo demonstração (dados fictícios)
+        </button>
+      </form>
+    </div>
+  );
+}
+
 function Settings({
   goals,
   setGoals,
   sheet,
   reload,
-  sheetUrlSetting,
-  setSheetUrlSetting,
+  sbConfigured,
+  session,
+  table,
+  setTable,
+  onSignOut,
 }: {
   goals: Goals;
   setGoals: (goals: Goals) => void;
   sheet: SheetState;
   reload: () => void;
-  sheetUrlSetting: string;
-  setSheetUrlSetting: (url: string) => void;
+  sbConfigured: boolean;
+  session: SbSession | null;
+  table: string;
+  setTable: (table: string) => void;
+  onSignOut: () => void;
 }) {
   const [csat, setCsat] = useState(String(goals.csat));
   const [agreement, setAgreement] = useState(String(goals.agreement));
   const [feedback, setFeedback] = useState(String(goals.feedback));
   const [message, setMessage] = useState("");
-  const [urlInput, setUrlInput] = useState(sheetUrlSetting);
-  const [urlError, setUrlError] = useState("");
+  const [tableInput, setTableInput] = useState(table);
+  const [tableError, setTableError] = useState("");
 
-  const connect = () => {
-    const value = urlInput.trim();
-    if (value && !/^https:\/\/docs\.google\.com\/spreadsheets\//.test(value)) {
-      setUrlError("Cole um link do Google Sheets (começa com https://docs.google.com/spreadsheets/...).");
+  const saveTable = () => {
+    const value = tableInput.trim();
+    if (!/^[A-Za-z0-9_]+$/.test(value)) {
+      setTableError("Use só letras, números e _ no nome da tabela (sem espaços nem acentos).");
       return;
     }
-    setUrlError("");
-    if (value === sheetUrlSetting) reload();
-    else setSheetUrlSetting(value);
-  };
-
-  const disconnect = () => {
-    setUrlInput("");
-    setUrlError("");
-    setSheetUrlSetting("");
+    setTableError("");
+    if (value === table) reload();
+    else setTable(value);
   };
 
   const saveGoals = () => {
@@ -2279,57 +2523,78 @@ function Settings({
 
   const statusLabel =
     sheet.status === "ok"
-      ? "Conectada"
+      ? "Conectado"
       : sheet.status === "loading"
       ? "Carregando…"
       : sheet.status === "error"
       ? "Com erro"
-      : "Não conectada (modo demonstração)";
+      : "Não conectado (modo demonstração)";
 
   const paramMissing = sheet.status === "ok" && sheet.mapping.filter((m) => /^p[1-5]$/.test(m.field) && !m.header).length > 0;
+  const sqlTable = /^[A-Za-z0-9_]+$/.test(table) ? table : SB_DEFAULT_TABLE;
 
   return (
     <main className="content">
       <div className="panel">
         <div className="page-actions">
           <div>
-            <h3>Fonte de dados (Google Sheets)</h3>
-            <p className="muted">A planilha é a base da ferramenta: Dashboard, Monitorias, Equipe e Relatórios leem dela.</p>
+            <h3>Fonte de dados (Supabase)</h3>
+            <p className="muted">Dashboard, Monitorias, Equipe e Relatórios leem desta tabela.</p>
           </div>
           <div className={`badge ${sheet.status === "ok" ? "ok" : "warn"}`}>{statusLabel}</div>
         </div>
 
-        <div className="inline-form" style={{ marginTop: 16 }}>
-          <div style={{ flex: 1 }}>
-            <label className="field-label">LINK DA PLANILHA (CSV publicado ou link de compartilhamento)</label>
-            <input
-              className="input"
-              value={urlInput}
-              onChange={(e) => {
-                setUrlInput(e.target.value);
-                setUrlError("");
-              }}
-              placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv"
-            />
-          </div>
-          <button className="primary-button" onClick={connect}>Salvar e conectar</button>
-          {sheetUrlSetting && <button className="secondary-button" onClick={disconnect}>Desconectar</button>}
-        </div>
-        {urlError && <p className="negative" style={{ margin: "10px 0 0" }}>{urlError}</p>}
-        {ENV_URL && !sheetUrlSetting && (
-          <p className="muted" style={{ fontSize: 12 }}>Usando o link padrão configurado na Vercel (VITE_SHEET_CSV_URL).</p>
+        {sbConfigured ? (
+          <>
+            <div className="info-grid">
+              <div><small>PROJETO</small><strong>{SB_URL.replace(/^https?:\/\//, "")}</strong></div>
+              <div><small>USUÁRIO</small><strong>{session ? session.email : "não logado"}</strong></div>
+            </div>
+            <div className="inline-form" style={{ marginTop: 16 }}>
+              <div style={{ flex: 1 }}>
+                <label className="field-label">NOME DA TABELA</label>
+                <input
+                  className="input"
+                  value={tableInput}
+                  onChange={(e) => {
+                    setTableInput(e.target.value);
+                    setTableError("");
+                  }}
+                  placeholder={SB_DEFAULT_TABLE}
+                />
+              </div>
+              <button className="primary-button" onClick={saveTable}>Salvar e recarregar</button>
+              {session && <button className="secondary-button" onClick={onSignOut}>Sair</button>}
+            </div>
+            {tableError && <p className="negative" style={{ margin: "10px 0 0" }}>{tableError}</p>}
+          </>
+        ) : (
+          <div className="notice">Supabase não configurado (defina VITE_SUPABASE_URL e VITE_SUPABASE_KEY).</div>
         )}
         {sheet.status === "error" && <div className="notice">{sheet.message}</div>}
 
         <div className="rule-block" style={{ marginTop: 16 }}>
-          <strong>Como conectar</strong>
+          <strong>Como preparar os dados no Supabase</strong>
           <ol className="steps">
-            <li>Na planilha: <b>Arquivo → Compartilhar → Publicar na web</b>.</li>
-            <li>Escolha a <b>aba</b> com as monitorias e o formato <b>Valores separados por vírgula (.csv)</b>, e clique em <b>Publicar</b>.</li>
-            <li>Copie o link gerado e cole no campo acima. Para valer para todos os usuários, cadastre o mesmo link na Vercel como <b>VITE_SHEET_CSV_URL</b> e faça um novo deploy.</li>
+            <li>
+              <b>Tabela:</b> em <b>Table Editor → New table → Import data via spreadsheet</b>, envie o CSV baixado da planilha
+              (<b>Arquivo → Fazer download → CSV</b>) e dê à tabela o nome <code>{sqlTable}</code>. O painel reconhece as colunas pelo nome do cabeçalho.
+            </li>
+            <li>
+              <b>Proteção (RLS):</b> abra o <b>SQL Editor</b>, cole o código abaixo e execute. Ele deixa só usuários logados lerem a tabela.
+            </li>
+            <li>
+              <b>Usuários:</b> em <b>Authentication → Users → Add user → Create new user</b>, informe e-mail e senha e marque <b>Auto Confirm User</b>.
+            </li>
           </ol>
+          <pre className="code">{`alter table public.${sqlTable} enable row level security;
+
+create policy "leitura para usuarios logados"
+  on public.${sqlTable} for select
+  to authenticated
+  using (true);`}</pre>
           <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-            Atenção: quem tiver o link consegue ler os dados da aba publicada. Não publique nada que não possa ser visto por terceiros.
+            Use somente a chave <b>publishable</b> no painel. Nunca coloque a chave <b>secret</b> ou <b>service_role</b> aqui. Enquanto TI e jurídico não aprovarem o uso dos dados reais, importe apenas dados fictícios ou anonimizados.
           </p>
         </div>
 
@@ -2346,7 +2611,7 @@ function Settings({
                 <thead>
                   <tr>
                     <th>CAMPO DA FERRAMENTA</th>
-                    <th>COLUNA NA PLANILHA</th>
+                    <th>COLUNA NA TABELA</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2371,7 +2636,7 @@ function Settings({
 
       <div className="panel" style={{ marginTop: 20 }}>
         <h3>Metas do processo</h3>
-        <p className="muted">Indicadores da seção 8 do Processo de Monitoria. Os pesos e a régua ficam na página Parâmetros.</p>
+        <p className="muted">Indicadores da seção 8 do Processo de Monitoria. A régua e os parâmetros ficam na página Parâmetros.</p>
         <div style={{ marginTop: 16, display: "grid", gap: 16 }}>
           <div className="rule-block">
             <strong>CSAT (meta, %)</strong>
@@ -2487,13 +2752,41 @@ export default function App() {
   const [teams, setTeams] = usePersistentState<string[]>("qualita:v2:teams", []);
   const [scorecard, setScorecard] = usePersistentState<Scorecard>("qualita:v3:scorecard", DEFAULT_SCORECARD);
   const [goals, setGoals] = usePersistentState<Goals>("qualita:v3:goals", DEFAULT_GOALS);
-  const [sheetUrlSetting, setSheetUrlSetting] = usePersistentState<string>("qualita:v2:sheetUrl", "");
+  const [session, setSession] = usePersistentState<SbSession | null>("qualita:v3:session", null);
+  const [table, setTable] = usePersistentState<string>("qualita:v3:table", SB_DEFAULT_TABLE);
+  const [previewDemo, setPreviewDemo] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
-  const sheetUrl = resolveSheetUrl(sheetUrlSetting || ENV_URL);
-  const [sheet, reload] = useSheet(sheetUrl);
+  const sbConfigured = Boolean(SB_URL && SB_KEY);
+  const csvUrl = resolveSheetUrl(ENV_URL);
+  const tableName = table.trim() || SB_DEFAULT_TABLE;
+
+  /* Fonte dos dados: Supabase (com login) > planilha publicada (só se o Supabase não estiver configurado) > demonstração */
+  let source: DataSource = { key: "demo", load: null };
+  if (sbConfigured) {
+    if (session && !previewDemo) {
+      const current = session;
+      source = {
+        key: `sb|${tableName}|${current.email}`,
+        load: () => sbFetchRows(tableName, makeTokenGetter(current, setSession)),
+      };
+    }
+  } else if (csvUrl) {
+    source = { key: `csv|${csvUrl}`, load: () => fetchCsvRows(csvUrl) };
+  }
+
+  const [sheet, reload] = useSheet(source);
   const isDemo = sheet.status === "demo";
 
-  /* O conceito vem da planilha quando existir; senão é calculado pela régua do scorecard */
+  /* Sessão vencida ou recusada pelo Supabase: volta para a tela de login */
+  useEffect(() => {
+    if (sheet.authExpired) {
+      setSession(null);
+      setSessionExpired(true);
+    }
+  }, [sheet.authExpired, setSession]);
+
+  /* O conceito vem da fonte de dados quando existir; senão é calculado pela régua do scorecard */
   const records = useMemo(
     () =>
       sheet.records.map((r) =>
@@ -2511,7 +2804,7 @@ export default function App() {
     [isDemo, teams, people]
   );
 
-  /* Define o time de uma pessoa (cria o cadastro se ela só existir na planilha) */
+  /* Define o time de uma pessoa (cria o cadastro se ela só existir na fonte de dados) */
   const assignTeam = (name: string, team: string) => {
     const key = norm(name);
     const exists = registered.some((p) => norm(p.name) === key);
@@ -2534,12 +2827,45 @@ export default function App() {
     setAuditOpen(true);
   };
 
+  const signOut = () => {
+    if (session) {
+      fetch(`${SB_URL}/auth/v1/logout`, {
+        method: "POST",
+        headers: { apikey: SB_KEY, Authorization: `Bearer ${session.access_token}` },
+      }).catch(() => undefined);
+    }
+    setSession(null);
+    setPreviewDemo(false);
+    setSessionExpired(false);
+  };
+
+  if (sbConfigured && !session && !previewDemo) {
+    return (
+      <LoginScreen
+        notice={sessionExpired ? "Sua sessão expirou. Entre novamente." : ""}
+        onSignedIn={(s) => {
+          setSession(s);
+          setSessionExpired(false);
+        }}
+        onDemo={() => setPreviewDemo(true)}
+      />
+    );
+  }
+
   return (
     <div className="app-container">
-      <Sidebar page={page} setPage={setPage} />
+      <Sidebar page={page} setPage={setPage} userEmail={session?.email} onSignOut={session ? signOut : undefined} />
       <div className="workspace">
         <Header page={page} />
-        {page !== "settings" && <SourceBanner sheet={sheet} reload={reload} goSettings={() => setPage("settings")} />}
+        {page !== "settings" && (
+          <SourceBanner
+            sheet={sheet}
+            reload={reload}
+            goSettings={() => setPage("settings")}
+            onLogin={sbConfigured && !session ? () => setPreviewDemo(false) : undefined}
+            label={sbConfigured ? "Supabase" : "arquivo CSV"}
+          />
+        )}
         {page === "dashboard" && (
           <Dashboard
             people={people}
@@ -2572,8 +2898,11 @@ export default function App() {
             setGoals={setGoals}
             sheet={sheet}
             reload={reload}
-            sheetUrlSetting={sheetUrlSetting}
-            setSheetUrlSetting={setSheetUrlSetting}
+            sbConfigured={sbConfigured}
+            session={session}
+            table={tableName}
+            setTable={setTable}
+            onSignOut={signOut}
           />
         )}
       </div>
