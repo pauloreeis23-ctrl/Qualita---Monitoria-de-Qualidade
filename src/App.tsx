@@ -1,22 +1,189 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
-const agents = [
-  { rank: 1, name: "Marina Costa", team: "Equipe Safira", audits: 48, score: 96.8, trend: 2.4, initials: "MC", color: "#826be0" },
-  { rank: 2, name: "Rafael Martins", team: "Equipe Safira", audits: 45, score: 94.2, trend: 1.8, initials: "RM", color: "#61c5b2" },
-  { rank: 3, name: "Ana Carolina", team: "Equipe Esmeralda", audits: 41, score: 91.7, trend: 0.6, initials: "AC", color: "#e5a45c" },
-  { rank: 4, name: "Carlos Lima", team: "Equipe Esmeralda", audits: 37, score: 87.4, trend: 1.2, initials: "CL", color: "#5ea3e0" },
+/* ============================== Tipos ============================== */
+
+type Agent = {
+  id: number;
+  name: string;
+  team: string;
+  audits: number;
+  score: number;
+  trend: number;
+  initials: string;
+  color: string;
+};
+
+type Block = { id: number; name: string; weight: number; desc: string };
+
+type Config = { profile: string; minScore: number; targetAudits: number };
+
+/* ============================== Dados iniciais ============================== */
+
+const TEAMS = ["Equipe Safira", "Equipe Esmeralda", "Equipe Rubi"];
+const PALETTE = ["#826be0", "#61c5b2", "#e5a45c", "#5ea3e0", "#d46a8a", "#b86bd1"];
+
+const INITIAL_AGENTS: Agent[] = [
+  { id: 1, name: "Marina Costa", team: "Equipe Safira", audits: 48, score: 96.8, trend: 2.4, initials: "MC", color: "#826be0" },
+  { id: 2, name: "Rafael Martins", team: "Equipe Safira", audits: 45, score: 94.2, trend: 1.8, initials: "RM", color: "#61c5b2" },
+  { id: 3, name: "Ana Carolina", team: "Equipe Esmeralda", audits: 41, score: 91.7, trend: 0.6, initials: "AC", color: "#e5a45c" },
+  { id: 4, name: "Carlos Lima", team: "Equipe Esmeralda", audits: 37, score: 87.4, trend: 1.2, initials: "CL", color: "#5ea3e0" },
+  { id: 5, name: "Bianca Oliveira", team: "Equipe Safira", audits: 34, score: 84.9, trend: 1.1, initials: "BO", color: "#b86bd1" },
+  { id: 6, name: "Diego Freitas", team: "Equipe Esmeralda", audits: 32, score: 78.6, trend: -2.3, initials: "DF", color: "#d9776a" },
+  { id: 7, name: "Juliana Alves", team: "Equipe Rubi", audits: 29, score: 93.1, trend: 3.2, initials: "JA", color: "#4fa3a5" },
 ];
 
-function Icon({ name, size = 18 }: { name: string; size?: number }) {
+const DEFAULT_BLOCKS: Block[] = [
+  { id: 1, name: "Empatia e Conexão com o Cliente", weight: 35, desc: "Avalia clareza, tom de voz e escuta ativa." },
+  { id: 2, name: "Resolução Técnica e Processual", weight: 40, desc: "Verifica acurácia das informações e uso correto dos sistemas." },
+  { id: 3, name: "Protocolo e Compliance (LGPD)", weight: 25, desc: "Checa cumprimento de normas de segurança e sigilo." },
+];
+
+const DEFAULT_CONFIG: Config = { profile: "Atendimento / SAC", minScore: 85, targetAudits: 12 };
+
+/* Perfis de exemplo. Ajuste os valores conforme a realidade da sua operação. */
+const MARKET_PROFILES: Record<
+  string,
+  { description: string; minScore: number; targetAudits: number; blocks: Omit<Block, "id">[] }
+> = {
+  "Atendimento / SAC": {
+    description: "Foco em empatia, resolução no primeiro contato e conformidade.",
+    minScore: 85,
+    targetAudits: 12,
+    blocks: [
+      { name: "Empatia e Conexão com o Cliente", weight: 35, desc: "Avalia clareza, tom de voz e escuta ativa." },
+      { name: "Resolução Técnica e Processual", weight: 40, desc: "Verifica acurácia das informações e uso dos sistemas." },
+      { name: "Protocolo e Compliance (LGPD)", weight: 25, desc: "Checa cumprimento de normas de segurança e sigilo." },
+    ],
+  },
+  "Vendas e Relacionamento": {
+    description: "Foco em abordagem, negociação e acompanhamento do cliente.",
+    minScore: 80,
+    targetAudits: 10,
+    blocks: [
+      { name: "Abordagem e Diagnóstico", weight: 30, desc: "Qualidade das perguntas e entendimento da necessidade." },
+      { name: "Negociação e Argumentação", weight: 40, desc: "Apresentação de valor e contorno de objeções." },
+      { name: "Fechamento e Follow-up", weight: 30, desc: "Condução ao fechamento e próximos passos combinados." },
+    ],
+  },
+  "Cobrança e Recuperação": {
+    description: "Foco em conformidade legal, negociação e comunicação respeitosa.",
+    minScore: 88,
+    targetAudits: 15,
+    blocks: [
+      { name: "Conformidade Legal e Regulatória", weight: 45, desc: "Cumprimento de normas de cobrança e LGPD." },
+      { name: "Negociação e Acordo", weight: 35, desc: "Proposta adequada e registro correto do acordo." },
+      { name: "Comunicação e Postura", weight: 20, desc: "Tom respeitoso e clareza das informações." },
+    ],
+  },
+  "Suporte Técnico": {
+    description: "Foco em diagnóstico, aderência ao processo e comunicação técnica.",
+    minScore: 85,
+    targetAudits: 12,
+    blocks: [
+      { name: "Diagnóstico e Solução", weight: 45, desc: "Identificação correta da causa e solução aplicada." },
+      { name: "Aderência ao Processo", weight: 30, desc: "Registro, escalonamento e uso da base de conhecimento." },
+      { name: "Comunicação Técnica", weight: 25, desc: "Clareza das orientações passadas ao cliente." },
+    ],
+  },
+};
+
+const PERIODS: Record<string, { factor: number; scoreDelta: number; auditsDelta: number }> = {
+  "Últimos 7 dias": { factor: 0.23, scoreDelta: 1.1, auditsDelta: 3.4 },
+  "Últimos 15 dias": { factor: 0.5, scoreDelta: 2.3, auditsDelta: 6.8 },
+  "Últimos 30 dias": { factor: 1, scoreDelta: 4.2, auditsDelta: 12.5 },
+  "Últimos 90 dias": { factor: 3, scoreDelta: 5.6, auditsDelta: 18.9 },
+};
+
+const ALL_TEAMS = "Todos os times";
+const ALL_CONSULTANTS = "Todos os consultores";
+
+/* ============================== Utilitários ============================== */
+
+function usePersistentState<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      /* armazenamento indisponível: segue sem persistir */
+    }
+  }, [key, value]);
+  return [value, setValue] as const;
+}
+
+const fmt = (n: number, digits = 1) =>
+  n.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+
+const fmtTrend = (t: number) => `${t >= 0 ? "+" : "-"}${fmt(Math.abs(t))}%`;
+
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+function weightedScore(list: Agent[]) {
+  const total = list.reduce((sum, a) => sum + a.audits, 0);
+  if (!total) return 0;
+  return list.reduce((sum, a) => sum + a.score * a.audits, 0) / total;
+}
+
+/* ============================== Componentes base ============================== */
+
+function Icon({ size = 18 }: { name?: string; size?: number }) {
   return <span style={{ fontSize: size, lineHeight: 1, display: "inline-flex" }}>✦</span>;
 }
 
-function Sidebar({ page, setPage }: { page: string; setPage: (value: string) => void }) {
+function Dropdown({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="dropdown">
+      <button className="filter" onClick={() => setOpen(!open)}>
+        <span>{label}</span>
+        <strong>{value} ▾</strong>
+      </button>
+      {open && (
+        <>
+          <div className="dropdown-backdrop" onClick={() => setOpen(false)} />
+          <div className="dropdown-menu">
+            {options.map((option) => (
+              <div
+                key={option}
+                className={option === value ? "selected" : ""}
+                onClick={() => {
+                  onChange(option);
+                  setOpen(false);
+                }}
+              >
+                {option}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Sidebar({ page, setPage }: { page: string; setPage: (val: string) => void }) {
   const items = [
-    ["dashboard", "grid", "Dashboard"],
-    ["parameters", "sliders", "Parâmetros"],
-    ["team", "users", "Equipe"],
-    ["reports", "chart", "Relatórios"],
+    ["dashboard", "Dashboard"],
+    ["parameters", "Parâmetros"],
+    ["team", "Equipe"],
+    ["reports", "Relatórios"],
   ];
   return (
     <aside className="sidebar">
@@ -29,21 +196,21 @@ function Sidebar({ page, setPage }: { page: string; setPage: (value: string) => 
       </div>
       <nav>
         <p className="nav-label">MONITORIA</p>
-        {items.map(([id, icon, label]) => (
+        {items.map(([id, label]) => (
           <button key={id} className={page === id ? "active" : ""} onClick={() => setPage(id)}>
-            <Icon name={icon} size={19} /> {label}
+            <Icon size={19} /> {label}
           </button>
         ))}
         <p className="nav-label second">GESTÃO</p>
         <button className={page === "settings" ? "active" : ""} onClick={() => setPage("settings")}>
-          <Icon name="settings" size={19} /> Configurações
+          <Icon size={19} /> Configurações
         </button>
       </nav>
       <div className="sidebar-help">
         <span className="help-icon">?</span>
         <div>
-          <strong>Precisa de ajuda?</strong>
-          <span>Fale com nosso suporte</span>
+          <strong>Suporte Qualitá</strong>
+          <span>Central de atendimento</span>
         </div>
       </div>
     </aside>
@@ -53,10 +220,10 @@ function Sidebar({ page, setPage }: { page: string; setPage: (value: string) => 
 function Header({ page }: { page: string }) {
   const pages: Record<string, [string, string]> = {
     dashboard: ["Dashboard gerencial", "Acompanhe o desempenho da sua operação em tempo real."],
-    parameters: ["Construtor de parâmetros", "Configure critérios, pesos e regras da avaliação de qualidade."],
-    team: ["Gestão de equipe", "Acompanhe resultados individuais e a saúde dos seus times."],
+    parameters: ["Construtor de parâmetros", "Configure critérios, pesos dinâmicos e regras organizacionais."],
+    team: ["Gestão de equipe", "Gerencie colaboradores, equipes e indicadores individuais."],
     reports: ["Relatórios analíticos", "Explore tendências e exporte dados consolidados da operação."],
-    settings: ["Configurações", "Gerencie acessos, notificações e preferências do sistema."],
+    settings: ["Configurações e Governança", "Gerencie perfis de mercado, metas e preferências."],
   };
   const [title, description] = pages[page] ?? pages.dashboard;
   return (
@@ -76,33 +243,88 @@ function Header({ page }: { page: string }) {
   );
 }
 
-function Dashboard({ openAudit }: { openAudit: () => void }) {
+/* ============================== Dashboard ============================== */
+
+function Dashboard({
+  agents,
+  config,
+  openAudit,
+}: {
+  agents: Agent[];
+  config: Config;
+  openAudit: (agent?: Agent) => void;
+}) {
+  const [period, setPeriod] = useState("Últimos 30 dias");
+  const [team, setTeam] = useState(ALL_TEAMS);
+  const [consultant, setConsultant] = useState(ALL_CONSULTANTS);
+
+  const meta = PERIODS[period];
+  const teamOptions = [ALL_TEAMS, ...Array.from(new Set(agents.map((a) => a.team)))];
+  const consultantOptions = [
+    ALL_CONSULTANTS,
+    ...agents.filter((a) => team === ALL_TEAMS || a.team === team).map((a) => a.name),
+  ];
+
+  const filtered = agents
+    .map((a) => ({ ...a, audits: Math.round(a.audits * meta.factor) }))
+    .filter((a) => (team === ALL_TEAMS || a.team === team) && (consultant === ALL_CONSULTANTS || a.name === consultant))
+    .sort((a, b) => b.score - a.score);
+
+  const avg = weightedScore(filtered);
+  const previousAvg = avg / (1 + meta.scoreDelta / 100);
+  const totalAudits = filtered.reduce((sum, a) => sum + a.audits, 0);
+  const below = filtered.filter((a) => a.audits > 0 && a.score < config.minScore);
+  const deviationRate = totalAudits ? (below.reduce((sum, a) => sum + a.audits, 0) / totalAudits) * 100 : 0;
+
+  const clearFilters = () => {
+    setPeriod("Últimos 30 dias");
+    setTeam(ALL_TEAMS);
+    setConsultant(ALL_CONSULTANTS);
+  };
+
   return (
     <main className="content">
       <section className="filterbar">
         <div className="filters">
-          <button className="filter"><span>PERÍODO</span><strong>Últimos 30 dias</strong></button>
-          <button className="filter"><span>TIME</span><strong>Todos os times</strong></button>
-          <button className="filter"><span>CONSULTORES</span><strong>Todos os consultores</strong></button>
+          <Dropdown label="PERÍODO" value={period} options={Object.keys(PERIODS)} onChange={setPeriod} />
+          <Dropdown
+            label="TIME"
+            value={team}
+            options={teamOptions}
+            onChange={(value) => {
+              setTeam(value);
+              setConsultant(ALL_CONSULTANTS);
+            }}
+          />
+          <Dropdown label="CONSULTORES" value={consultant} options={consultantOptions} onChange={setConsultant} />
         </div>
-        <button className="secondary-button">Limpar filtros</button>
+        <button className="secondary-button" onClick={clearFilters}>Limpar filtros</button>
       </section>
 
       <section className="kpis">
-        <article className="kpi-card" onClick={openAudit} style={{ cursor: "pointer" }}>
-          <div className="kpi-header"><small>NOTA MÉDIA GERAL</small><span className="positive">+4,2%</span></div>
-          <div className="kpi-body"><strong>91,4</strong><span>/ 100</span></div>
-          <p>vs. 87,7 no período anterior</p>
+        <article className="kpi-card" onClick={() => openAudit()} style={{ cursor: "pointer" }}>
+          <div className="kpi-header">
+            <small>NOTA MÉDIA GERAL</small>
+            <span className="positive">+{fmt(meta.scoreDelta)}%</span>
+          </div>
+          <div className="kpi-body"><strong>{fmt(avg)}</strong><span>/ 100</span></div>
+          <p>vs. {fmt(previousAvg)} no período anterior</p>
         </article>
         <article className="kpi-card">
-          <div className="kpi-header"><small>AUDITORIAS REALIZADAS</small><span className="positive">+12,5%</span></div>
-          <div className="kpi-body"><strong>1.284</strong></div>
-          <p>142 auditorias esta semana</p>
+          <div className="kpi-header">
+            <small>AUDITORIAS REALIZADAS</small>
+            <span className="positive">+{fmt(meta.auditsDelta)}%</span>
+          </div>
+          <div className="kpi-body"><strong>{totalAudits.toLocaleString("pt-BR")}</strong></div>
+          <p>{period.toLowerCase()}</p>
         </article>
         <article className="kpi-card">
-          <div className="kpi-header"><small>TAXA DE DESVIOS</small><span className="negative">-2,1%</span></div>
-          <div className="kpi-body"><strong>6,8%</strong></div>
-          <p>87 itens críticos identificados</p>
+          <div className="kpi-header">
+            <small>TAXA DE DESVIOS</small>
+            <span className={below.length ? "negative" : "positive"}>{below.length} abaixo da meta</span>
+          </div>
+          <div className="kpi-body"><strong>{fmt(deviationRate)}%</strong></div>
+          <p>auditorias de consultores abaixo de {config.minScore} pontos</p>
         </article>
       </section>
 
@@ -110,15 +332,271 @@ function Dashboard({ openAudit }: { openAudit: () => void }) {
         <div className="panel-heading">
           <div>
             <h3>Ranking da equipe</h3>
-            <p>Desempenho dos consultores no período</p>
+            <p>Desempenho dos consultores no período selecionado</p>
           </div>
-          <button className="secondary-button">Ver ranking completo</button>
+          <button className="secondary-button" onClick={() => openAudit()}>Ver auditorias</button>
         </div>
+        {filtered.length === 0 ? (
+          <p className="empty">Nenhum consultor encontrado para os filtros selecionados.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>CONSULTOR</th>
+                <th>TIME</th>
+                <th>AUDITORIAS</th>
+                <th>NOTA MÉDIA</th>
+                <th>EVOLUÇÃO</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((agent, index) => (
+                <tr key={agent.id} onClick={() => openAudit(agent)} style={{ cursor: "pointer" }}>
+                  <td><span className={`rank rank-${index + 1}`}>{index + 1}</span></td>
+                  <td>
+                    <div className="agent">
+                      <span className="avatar" style={{ background: agent.color }}>{agent.initials}</span>
+                      <strong>{agent.name}</strong>
+                    </div>
+                  </td>
+                  <td>{agent.team}</td>
+                  <td>{agent.audits}</td>
+                  <td>{agent.audits ? <><strong>{fmt(agent.score)}</strong> / 100</> : "—"}</td>
+                  <td>
+                    <span className={agent.trend >= 0 ? "positive" : "negative"}>{fmtTrend(agent.trend)}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </main>
+  );
+}
+
+/* ============================== Parâmetros ============================== */
+
+function Parameters({
+  blocks,
+  setBlocks,
+  config,
+}: {
+  blocks: Block[];
+  setBlocks: (blocks: Block[]) => void;
+  config: Config;
+}) {
+  const [newTitle, setNewTitle] = useState("");
+  const [newWeight, setNewWeight] = useState("15");
+  const [samples, setSamples] = useState<Record<number, number>>({});
+
+  const totalWeight = blocks.reduce((sum, b) => sum + b.weight, 0);
+  const isValid = totalWeight === 100;
+
+  const update = (id: number, patch: Partial<Block>) =>
+    setBlocks(blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+
+  const addBlock = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+    setBlocks([
+      ...blocks,
+      {
+        id: Date.now(),
+        name: newTitle.trim(),
+        weight: clamp(Number(newWeight) || 0, 0, 100),
+        desc: "Critério personalizado da organização.",
+      },
+    ]);
+    setNewTitle("");
+  };
+
+  const normalize = () => {
+    if (!totalWeight) return;
+    let accumulated = 0;
+    setBlocks(
+      blocks.map((b, i) => {
+        if (i === blocks.length - 1) return { ...b, weight: Math.max(0, 100 - accumulated) };
+        const w = Math.round((b.weight / totalWeight) * 100);
+        accumulated += w;
+        return { ...b, weight: w };
+      })
+    );
+  };
+
+  const sampleOf = (id: number) => samples[id] ?? 90;
+  const finalScore = totalWeight ? blocks.reduce((sum, b) => sum + sampleOf(b.id) * b.weight, 0) / totalWeight : 0;
+
+  return (
+    <main className="content parameters-page">
+      <div className="panel">
+        <div className="page-actions">
+          <div>
+            <h3>Construtor Modular de Parâmetros</h3>
+            <p className="muted">Edite nomes, descrições e pesos. A nota final de cada auditoria usa a média ponderada destes blocos.</p>
+          </div>
+          <div className={`badge ${isValid ? "ok" : "warn"}`}>
+            Peso total: {totalWeight}% {!isValid && "(deve somar 100%)"}
+          </div>
+        </div>
+
+        {!isValid && (
+          <div className="notice">
+            A soma dos pesos precisa ser 100%.{" "}
+            <button className="link-button" onClick={normalize}>Ajustar proporcionalmente</button>
+          </div>
+        )}
+
+        <div className="block-list">
+          {blocks.map((b, idx) => (
+            <div key={b.id} className="rule-block">
+              <div className="block-fields">
+                <input
+                  className="input"
+                  value={b.name}
+                  onChange={(e) => update(b.id, { name: e.target.value })}
+                  aria-label={`Nome do bloco ${idx + 1}`}
+                />
+                <input
+                  className="input small"
+                  value={b.desc}
+                  onChange={(e) => update(b.id, { desc: e.target.value })}
+                  aria-label={`Descrição do bloco ${idx + 1}`}
+                />
+              </div>
+              <div className="block-weight">
+                <label className="field-label">PESO (%)</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={b.weight}
+                  onChange={(e) => update(b.id, { weight: clamp(Number(e.target.value) || 0, 0, 100) })}
+                />
+              </div>
+              <button className="secondary-button" onClick={() => setBlocks(blocks.filter((x) => x.id !== b.id))}>
+                Remover
+              </button>
+            </div>
+          ))}
+          {blocks.length === 0 && <p className="empty">Nenhum bloco cadastrado. Adicione o primeiro abaixo.</p>}
+        </div>
+
+        <form onSubmit={addBlock} className="inline-form">
+          <div style={{ flex: 1 }}>
+            <label className="field-label">NOVO CRITÉRIO / BLOCO</label>
+            <input className="input" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Ex: Clareza na Escrita" />
+          </div>
+          <div style={{ width: 110 }}>
+            <label className="field-label">PESO (%)</label>
+            <input className="input" type="number" min={0} max={100} value={newWeight} onChange={(e) => setNewWeight(e.target.value)} />
+          </div>
+          <button type="submit" className="primary-button">Adicionar bloco</button>
+        </form>
+      </div>
+
+      <div className="panel" style={{ marginTop: 20 }}>
+        <h3>Simulador de nota final</h3>
+        <p className="muted">Informe uma nota de 0 a 100 para cada bloco e veja o resultado ponderado pelos pesos acima.</p>
+        <div className="sim-grid">
+          {blocks.map((b) => (
+            <div key={b.id} className="sim-item">
+              <span>{b.name} <small className="muted">({b.weight}%)</small></span>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                max={100}
+                value={sampleOf(b.id)}
+                onChange={(e) => setSamples({ ...samples, [b.id]: clamp(Number(e.target.value) || 0, 0, 100) })}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="sim-result">
+          <span>Nota final ponderada</span>
+          <strong>{fmt(finalScore)} / 100</strong>
+          <span className={finalScore >= config.minScore ? "positive" : "negative"}>
+            {finalScore >= config.minScore ? "Acima" : "Abaixo"} da nota mínima ({config.minScore})
+          </span>
+        </div>
+        <p className="muted" style={{ fontSize: 12 }}>
+          Fórmula: soma de (nota do bloco × peso) ÷ soma dos pesos. Se os pesos não somarem 100%, o resultado é normalizado automaticamente.
+        </p>
+      </div>
+    </main>
+  );
+}
+
+/* ============================== Equipe ============================== */
+
+function Team({
+  agents,
+  setAgents,
+  openAudit,
+}: {
+  agents: Agent[];
+  setAgents: (agents: Agent[]) => void;
+  openAudit: (agent?: Agent) => void;
+}) {
+  const [showModal, setShowModal] = useState(false);
+  const [name, setName] = useState("");
+  const [team, setTeam] = useState(TEAMS[0]);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const closeModal = () => {
+    setShowModal(false);
+    setError("");
+    setName("");
+  };
+
+  const addAgent = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = name.trim().replace(/\s+/g, " ");
+    if (!cleanName) {
+      setError("Informe o nome do colaborador.");
+      return;
+    }
+    if (agents.some((a) => a.name.toLowerCase() === cleanName.toLowerCase())) {
+      setError("Já existe um colaborador com esse nome.");
+      return;
+    }
+    const newMember: Agent = {
+      id: Date.now(),
+      name: cleanName,
+      team,
+      audits: 0,
+      score: 0,
+      trend: 0,
+      initials: cleanName.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase(),
+      color: PALETTE[agents.length % PALETTE.length],
+    };
+    setAgents([...agents, newMember]);
+    setSuccess(`${cleanName} foi cadastrado(a) em ${team}.`);
+    closeModal();
+  };
+
+  const sorted = [...agents].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+
+  return (
+    <main className="content">
+      <div className="page-actions">
+        <h3>Colaboradores e Equipes ({agents.length})</h3>
+        <button className="primary-button" onClick={() => { setSuccess(""); setShowModal(true); }}>
+          + Cadastrar novo colaborador
+        </button>
+      </div>
+
+      {success && <div className="notice success">{success}</div>}
+
+      <div className="panel" style={{ marginTop: 16 }}>
         <table>
           <thead>
             <tr>
-              <th>#</th>
-              <th>CONSULTOR</th>
+              <th>COLABORADOR</th>
               <th>TIME</th>
               <th>AUDITORIAS</th>
               <th>NOTA MÉDIA</th>
@@ -126,126 +604,270 @@ function Dashboard({ openAudit }: { openAudit: () => void }) {
             </tr>
           </thead>
           <tbody>
-            {agents.map((agent) => (
-              <tr key={agent.name} onClick={openAudit} style={{ cursor: "pointer" }}>
-                <td><span className={`rank rank-${agent.rank}`}>{agent.rank}</span></td>
+            {sorted.map((a) => (
+              <tr key={a.id} onClick={() => openAudit(a)} style={{ cursor: "pointer" }}>
                 <td>
                   <div className="agent">
-                    <span className="avatar" style={{ background: agent.color }}>{agent.initials}</span>
-                    <strong>{agent.name}</strong>
+                    <span className="avatar" style={{ background: a.color }}>{a.initials}</span>
+                    <strong>{a.name}</strong>
                   </div>
                 </td>
-                <td>{agent.team}</td>
-                <td>{agent.audits}</td>
-                <td><strong>{agent.score}</strong> / 100</td>
-                <td><span className="positive">+{agent.trend}%</span></td>
+                <td>{a.team}</td>
+                <td>{a.audits}</td>
+                <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 100</> : "—"}</td>
+                <td>
+                  {a.audits ? <span className={a.trend >= 0 ? "positive" : "negative"}>{fmtTrend(a.trend)}</span> : "—"}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
-      </section>
-    </main>
-  );
-}
+      </div>
 
-function Parameters() {
-  return (
-    <main className="content parameters-page">
-      <div className="panel" style={{ padding: "24px" }}>
-        <h3>Construtor Modular de Parâmetros</h3>
-        <p style={{ color: "var(--muted)", marginTop: "6px" }}>Gerencie os pesos e blocos avaliativos da sua operação.</p>
-        <div style={{ marginTop: "20px", display: "grid", gap: "12px" }}>
-          <div className="rule-block">
-            <strong>1. Empatia e Comunicação (Peso: 35%)</strong>
-            <p style={{ color: "var(--muted)", fontSize: "12px" }}>Avalia clareza, tom de voz e conexão com o cliente.</p>
-          </div>
-          <div className="rule-block">
-            <strong>2. Resolução Técnica e Processo (Peso: 40%)</strong>
-            <p style={{ color: "var(--muted)", fontSize: "12px" }}>Verifica acurácia das informações e uso correto dos sistemas.</p>
-          </div>
-          <div className="rule-block">
-            <strong>3. Protocolo e Compliance (Peso: 25%)</strong>
-            <p style={{ color: "var(--muted)", fontSize: "12px" }}>Checa cumprimento de normas de segurança e LGPD.</p>
+      {showModal && (
+        <div className="drawer-overlay" onClick={closeModal}>
+          <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
+            <h3>Cadastrar novo colaborador</h3>
+            <p className="muted" style={{ fontSize: 13 }}>Informe o nome e o time do novo membro.</p>
+            <form onSubmit={addAgent} style={{ marginTop: 20, display: "grid", gap: 14 }}>
+              <div>
+                <label className="field-label">NOME COMPLETO</label>
+                <input className="input" autoFocus value={name} onChange={(e) => { setName(e.target.value); setError(""); }} placeholder="Ex: Juliana Souza" />
+              </div>
+              <div>
+                <label className="field-label">TIME</label>
+                <select className="input" value={team} onChange={(e) => setTeam(e.target.value)}>
+                  {TEAMS.map((t) => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+              {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
+              <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+                <button type="button" className="secondary-button" style={{ flex: 1 }} onClick={closeModal}>Cancelar</button>
+                <button type="submit" className="primary-button" style={{ flex: 1 }}>Salvar</button>
+              </div>
+            </form>
           </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }
 
-function Team() {
+/* ============================== Relatórios ============================== */
+
+function Reports({ agents, config }: { agents: Agent[]; config: Config }) {
+  const totalAudits = agents.reduce((sum, a) => sum + a.audits, 0);
+  const avg = weightedScore(agents);
+  const below = agents.filter((a) => a.audits > 0 && a.score < config.minScore).length;
+  const teams = Array.from(new Set(agents.map((a) => a.team)));
+
   return (
     <main className="content">
-      <div className="panel" style={{ padding: "24px" }}>
-        <h3>Gestão de Equipe</h3>
-        <p style={{ color: "var(--muted)", marginTop: "6px" }}>Todos os colaboradores ativos no sistema.</p>
-        <div style={{ marginTop: "16px" }}>
-          {agents.map((a) => (
-            <div key={a.name} style={{ display: "flex", justifyContent: "space-between", padding: "12px 0", borderBottom: "1px solid var(--line)" }}>
-              <span>{a.name} ({a.team})</span>
-              <strong>Nota: {a.score}</strong>
-            </div>
-          ))}
+      <div className="panel">
+        <h3>Relatórios Analíticos e Exportação</h3>
+        <p className="muted">Consolidado de conformidade e auditorias da operação (últimos 30 dias).</p>
+        <div className="kpis" style={{ marginTop: 20 }}>
+          <div className="kpi-card">
+            <small>NOTA MÉDIA GERAL</small>
+            <div className="kpi-body"><strong>{fmt(avg)}</strong><span>/ 100</span></div>
+          </div>
+          <div className="kpi-card">
+            <small>AUDITORIAS CONCLUÍDAS</small>
+            <div className="kpi-body"><strong>{totalAudits.toLocaleString("pt-BR")}</strong></div>
+          </div>
+          <div className="kpi-card">
+            <small>ABAIXO DA NOTA MÍNIMA</small>
+            <div className="kpi-body"><strong>{below}</strong><span>colaboradores</span></div>
+          </div>
         </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>TIME</th>
+              <th>COLABORADORES</th>
+              <th>AUDITORIAS</th>
+              <th>NOTA MÉDIA</th>
+            </tr>
+          </thead>
+          <tbody>
+            {teams.map((t) => {
+              const members = agents.filter((a) => a.team === t);
+              return (
+                <tr key={t}>
+                  <td><strong>{t}</strong></td>
+                  <td>{members.length}</td>
+                  <td>{members.reduce((sum, a) => sum + a.audits, 0)}</td>
+                  <td>{members.some((a) => a.audits) ? fmt(weightedScore(members)) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </main>
   );
 }
 
-function Reports() {
+/* ============================== Configurações ============================== */
+
+function Settings({
+  config,
+  setConfig,
+  setBlocks,
+}: {
+  config: Config;
+  setConfig: (config: Config) => void;
+  setBlocks: (blocks: Block[]) => void;
+}) {
+  const profileNames = Object.keys(MARKET_PROFILES);
+  const [selected, setSelected] = useState(profileNames.includes(config.profile) ? config.profile : profileNames[0]);
+  const [minScore, setMinScore] = useState(String(config.minScore));
+  const [targetAudits, setTargetAudits] = useState(String(config.targetAudits));
+  const [message, setMessage] = useState("");
+
+  const profile = MARKET_PROFILES[selected];
+
+  const applyProfile = () => {
+    setBlocks(profile.blocks.map((b, i) => ({ ...b, id: Date.now() + i })));
+    setConfig({ profile: selected, minScore: profile.minScore, targetAudits: profile.targetAudits });
+    setMinScore(String(profile.minScore));
+    setTargetAudits(String(profile.targetAudits));
+    setMessage(`Perfil "${selected}" aplicado: nota mínima, meta de auditorias e blocos de parâmetros foram atualizados.`);
+  };
+
+  const save = () => {
+    const min = Number(minScore);
+    const target = Number(targetAudits);
+    if (!(min >= 0 && min <= 100) || !(target >= 1)) {
+      setMessage("Verifique os valores: a nota mínima vai de 0 a 100 e a meta deve ser de pelo menos 1 auditoria.");
+      return;
+    }
+    const matchesProfile =
+      MARKET_PROFILES[config.profile] &&
+      MARKET_PROFILES[config.profile].minScore === min &&
+      MARKET_PROFILES[config.profile].targetAudits === target;
+    setConfig({ profile: matchesProfile ? config.profile : "Personalizado", minScore: min, targetAudits: target });
+    setMessage("Configurações salvas com sucesso!");
+  };
+
   return (
     <main className="content">
-      <div className="panel" style={{ padding: "24px" }}>
-        <h3>Relatórios Analíticos</h3>
-        <p style={{ color: "var(--muted)", marginTop: "6px" }}>Dados consolidados e histórico de conformidade.</p>
+      <div className="panel">
+        <div className="page-actions">
+          <div>
+            <h3>Perfil padrão de mercado</h3>
+            <p className="muted">Carregue um modelo pronto de critérios, pesos e metas e depois ajuste ao seu negócio.</p>
+          </div>
+          <div className="badge ok">Perfil ativo: {config.profile}</div>
+        </div>
+
+        <div className="inline-form" style={{ marginTop: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label className="field-label">PERFIL</label>
+            <select className="input" value={selected} onChange={(e) => setSelected(e.target.value)}>
+              {profileNames.map((p) => <option key={p}>{p}</option>)}
+            </select>
+          </div>
+          <button className="primary-button" onClick={applyProfile}>Aplicar perfil</button>
+        </div>
+
+        <div className="rule-block" style={{ marginTop: 14 }}>
+          <strong>{selected}</strong>
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 8px" }}>{profile.description}</p>
+          <p style={{ fontSize: 13, margin: 0 }}>
+            Nota mínima: <strong>{profile.minScore}</strong> · Meta mensal: <strong>{profile.targetAudits} auditorias</strong>
+          </p>
+          <ul className="profile-blocks">
+            {profile.blocks.map((b) => (
+              <li key={b.name}>{b.name} <span className="muted">({b.weight}%)</span></li>
+            ))}
+          </ul>
+        </div>
+        <p className="muted" style={{ fontSize: 12 }}>
+          Valores de exemplo para ponto de partida, não são referências oficiais de mercado. Ao aplicar, os blocos atuais da página Parâmetros são substituídos.
+        </p>
+      </div>
+
+      <div className="panel" style={{ marginTop: 20 }}>
+        <h3>Metas e alertas</h3>
+        <p className="muted">Ajuste os valores aplicados em toda a plataforma.</p>
+        <div style={{ marginTop: 16, display: "grid", gap: 16 }}>
+          <div className="rule-block">
+            <strong>Nota mínima</strong>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
+              Consultores abaixo desta nota são contados como desvio no Dashboard e nos Relatórios.
+            </p>
+            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={minScore} onChange={(e) => setMinScore(e.target.value)} />
+          </div>
+          <div className="rule-block">
+            <strong>Meta mensal de auditorias por consultor</strong>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>
+              Volume necessário para garantir a representatividade estatística da operação.
+            </p>
+            <input className="input" style={{ width: 120 }} type="number" min={1} value={targetAudits} onChange={(e) => setTargetAudits(e.target.value)} />
+          </div>
+        </div>
+        <button className="primary-button" style={{ marginTop: 20 }} onClick={save}>Salvar configurações</button>
+        {message && <div className="notice success" style={{ marginTop: 14 }}>{message}</div>}
       </div>
     </main>
   );
 }
 
-function Settings() {
-  return (
-    <main className="content">
-      <div className="panel" style={{ padding: "24px" }}>
-        <h3>Configurações do Sistema</h3>
-        <p style={{ color: "var(--muted)", marginTop: "6px" }}>Preferências e governança geral.</p>
-      </div>
-    </main>
-  );
-}
+/* ============================== Auditoria (drawer) ============================== */
 
-function AuditDrawer({ close }: { close: () => void }) {
+function AuditDrawer({ agent, close }: { agent: Agent | null; close: () => void }) {
   return (
     <div className="drawer-overlay" onClick={close}>
-      <div className="drawer" onClick={(e) => e.stopPropagation()}>
-        <div className="drawer-header">
-          <h3>Detalhes da Auditoria</h3>
+      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 500, display: "flex", flexDirection: "column", padding: 0 }}>
+        <div className="drawer-header" style={{ padding: 20, borderBottom: "1px solid var(--line)", marginBottom: 0 }}>
+          <h3>Detalhes da Auditoria e Checklist</h3>
           <button onClick={close} className="secondary-button">Fechar</button>
         </div>
-        <div className="drawer-body" style={{ padding: "20px" }}>
-          <p>Visualização e edição cirúrgica de notas em tempo real.</p>
+        <div className="drawer-body" style={{ padding: 20, overflowY: "auto", flex: 1 }}>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Visualização do atendimento, histórico e recálculo de notas em tempo real.
+          </p>
+          <div className="rule-block" style={{ lineHeight: 1.8 }}>
+            <strong>Cliente:</strong> João Silva<br />
+            <strong>Atendente:</strong> {agent ? agent.name : "Marina Costa"}<br />
+            <strong>Nota atual:</strong> {agent ? (agent.audits ? fmt(agent.score) : "—") : "96,8"} / 100
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
+/* ============================== App ============================== */
+
 export default function App() {
   const [page, setPage] = useState("dashboard");
   const [auditOpen, setAuditOpen] = useState(false);
+  const [auditAgent, setAuditAgent] = useState<Agent | null>(null);
+
+  const [agents, setAgents] = usePersistentState<Agent[]>("qualita:v1:agents", INITIAL_AGENTS);
+  const [blocks, setBlocks] = usePersistentState<Block[]>("qualita:v1:blocks", DEFAULT_BLOCKS);
+  const [config, setConfig] = usePersistentState<Config>("qualita:v1:config", DEFAULT_CONFIG);
+
+  const openAudit = (agent?: Agent) => {
+    setAuditAgent(agent ?? null);
+    setAuditOpen(true);
+  };
 
   return (
     <div className="app-container">
       <Sidebar page={page} setPage={setPage} />
       <div className="workspace">
         <Header page={page} />
-        {page === "dashboard" && <Dashboard openAudit={() => setAuditOpen(true)} />}
-        {page === "parameters" && <Parameters />}
-        {page === "team" && <Team />}
-        {page === "reports" && <Reports />}
-        {page === "settings" && <Settings />}
+        {page === "dashboard" && <Dashboard agents={agents} config={config} openAudit={openAudit} />}
+        {page === "parameters" && <Parameters blocks={blocks} setBlocks={setBlocks} config={config} />}
+        {page === "team" && <Team agents={agents} setAgents={setAgents} openAudit={openAudit} />}
+        {page === "reports" && <Reports agents={agents} config={config} />}
+        {page === "settings" && <Settings config={config} setConfig={setConfig} setBlocks={setBlocks} />}
       </div>
-      {auditOpen && <AuditDrawer close={() => setAuditOpen(false)} />}
+      {auditOpen && <AuditDrawer agent={auditAgent} close={() => setAuditOpen(false)} />}
     </div>
   );
 }
