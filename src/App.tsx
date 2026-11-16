@@ -106,11 +106,17 @@ const SB_KEY: string = String((import.meta as any).env?.VITE_SUPABASE_KEY ?? "sb
 const SB_DEFAULT_TABLE = "monitorias";
 
 const DEFAULT_SCORECARD: Scorecard = {
-  version: "V4",
+  version: "V4 (piloto, 05/11/2026)",
   excellentMin: 9,
   adequateMin: 7,
   attentionMin: 5,
-  params: [],
+  params: [
+    { id: 1, name: "Classificação e triagem", evaluates: "Categoria, causa, solução.", full: "Todos corretos.", partial: "Um incorreto.", none: "Errado.", canBeNA: false, rule: "" },
+    { id: 2, name: "Condução ativa", evaluates: "Iniciativa.", full: "Proativo.", partial: "Razoável.", none: "Sem atualização.", canBeNA: true, rule: "" },
+    { id: 3, name: "Comunicação e prazos", evaluates: "Mensagens objetivas.", full: "Clara.", partial: "Genérica.", none: "Confusa.", canBeNA: true, rule: "" },
+    { id: 4, name: "Conclusão validada", evaluates: "Solicitação resolvida.", full: "Validado.", partial: "Sem validação explícita.", none: "Sumária.", canBeNA: false, rule: "" },
+    { id: 5, name: "Registro interno", evaluates: "Observação interna.", full: "Clara e estruturada.", partial: "Incompleto.", none: "Sem registro.", canBeNA: false, rule: "" },
+  ],
 };
 
 const DEFAULT_GOALS: Goals = { csat: 94, agreement: 90, feedback: 100 };
@@ -171,14 +177,6 @@ function conceptOf(total: number, sc: Scorecard): Concept {
   return "Crítico";
 }
 
-function rangeLabel(concept: Concept, sc: Scorecard) {
-  const [lo, hi] =
-    concept === "Excelente" ? [sc.excellentMin, 10] :
-    concept === "Adequado" ? [sc.adequateMin, sc.excellentMin - 1] :
-    concept === "Atenção" ? [sc.attentionMin, sc.adequateMin - 1] : [0, sc.attentionMin - 1];
-  return lo === hi ? `${lo}` : `${lo} a ${hi}`;
-}
-
 function parseConcept(value: string): Concept | null {
   const s = norm(value);
   if (s.startsWith("excelente")) return "Excelente";
@@ -188,6 +186,7 @@ function parseConcept(value: string): Concept | null {
   return null;
 }
 
+/* NOVA LÚGICA: Cálculo exato da porcentagem de CSAT não respondido */
 function csatNotAnsweredPercentage(list: Monitoria[]): { pct: number | null; answered: number; total: number } {
   const validList = list.filter((r) => !r.disregarded);
   if (validList.length === 0) return { pct: null, answered: 0, total: 0 };
@@ -263,7 +262,6 @@ function parseDateCell(value: string): number | null {
 }
 
 function recordsFromRows(rows: string[][]) {
-  const keysOf = (field: string) => FIELDS.find((f) => f.field === field)!.keys;
   const rawHeaders = rows[0] || [];
   const headers = rawHeaders.map(normHeader);
   
@@ -304,7 +302,7 @@ function recordsFromRows(rows: string[][]) {
 }
 
 /* =====================================================================
-   SUPABASE & HOOKS
+   SUPABASE
    ===================================================================== */
 
 async function sbFetchRows(table: string, session: SbSession): Promise<string[][]> {
@@ -374,7 +372,7 @@ function computeRows(people: Person[], records: Monitoria[], w: Win): AgentRow[]
 }
 
 /* =====================================================================
-   COMPONENTES UI
+   COMPONENTES DE UI
    ===================================================================== */
 
 function Icon() { return <span style={{ fontSize: 18, lineHeight: 1 }}>✦</span>; }
@@ -402,227 +400,4 @@ function Delta({ value, lowerIsBetter = false, unit = "%" }: { value: number | n
   if (value === null) return <span className="muted-text">—</span>;
   const good = lowerIsBetter ? value <= 0 : value >= 0;
   return <span className={good ? "positive" : "negative"}>{value >= 0 ? "+" : ""}{fmt(value)}{unit}</span>;
-}
-
-function ConceptPill({ concept }: { concept: Concept | null }) {
-  if (!concept) return <span className="muted-text">—</span>;
-  const color = CONCEPT_COLORS[concept];
-  return <span className="pill" style={{ color, background: `${color}22` }}>{concept}</span>;
-}
-
-function ConceptDistribution({ list }: { list: Scored[] }) {
-  const counts = conceptCounts(list);
-  const total = CONCEPTS.reduce((sum, c) => sum + counts[c], 0);
-  if (total === 0) return <p className="empty">Sem monitorias.</p>;
-  return (
-    <div className="concept-legend">
-      {CONCEPTS.map((c) => (
-        <div key={c}>
-          <span><i className="dot" style={{ background: CONCEPT_COLORS[c] }} />{c}</span>
-          <strong>{counts[c]}</strong>
-          <small>{fmt((counts[c] / total) * 100, 0)}%</small>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function conceptCounts(list: Scored[]): Record<Concept, number> {
-  const counts: Record<Concept, number> = { Excelente: 0, Adequado: 0, Atenção: 0, Crítico: 0 };
-  list.forEach((r) => { if (r.concept) counts[r.concept]++; });
-  return counts;
-}
-
-function ParamBars() { return <p className="empty">Parâmetros carregados.</p>; }
-
-function Sidebar({ page, setPage, userEmail }: { page: string; setPage: (v: string) => void; userEmail?: string }) {
-  const items = [["dashboard", "Dashboard"], ["monitorias", "Monitorias"], ["parameters", "Parâmetros"], ["team", "Equipe"], ["reports", "Relatórios"], ["settings", "Configurações"]];
-  return (
-    <aside className="sidebar">
-      <div className="brand"><div className="logo-mark">Q</div><div><strong>Qualitá</strong><span>MONITORIA</span></div></div>
-      <nav>
-        {items.map(([id, label]) => (
-          <button key={id} className={page === id ? "active" : ""} onClick={() => setPage(id)}><Icon /> {label}</button>
-        ))}
-      </nav>
-      {userEmail && <div className="sidebar-user"><span>{userEmail}</span></div>}
-    </aside>
-  );
-}
-
-function Header() {
-  return (
-    <header className="topbar">
-      <div><h1>Qualitá Gerencial</h1><p>Monitoria de Qualidade</p></div>
-      <div className="user-profile"><span className="avatar">PR</span><div><strong>Paulo Reis</strong><small>Analista</small></div></div>
-    </header>
-  );
-}
-
-function SourceBanner({ sheet, reload }: { sheet: SheetState; reload: () => void; goSettings: () => void }) {
-  return (
-    <div className="notice success source-banner">
-      <span>Conectado ao Supabase: {sheet.records.length} linhas</span>
-      <button className="secondary-button" onClick={reload}>Atualizar</button>
-    </div>
-  );
-}
-
-/* =====================================================================
-   DASHBOARD
-   ===================================================================== */
-
-function Dashboard({ people, records, teamList, scorecard, openAudit }: {
-  people: Person[]; records: Monitoria[]; teamList: string[]; scorecard: Scorecard; goals: Goals; openAudit: (p?: Person) => void;
-}) {
-  const [period, setPeriod] = useState("Últimos 30 dias");
-  const [team, setTeam] = useState(ALL_TEAMS);
-  const [consultant, setConsultant] = useState(ALL_CONSULTANTS);
-
-  const w = getWindow(period, Date.now());
-  const teamOf = new Map(people.map((p) => [norm(p.name), p.team]));
-  const matched = records.filter((r) => (team === ALL_TEAMS || (teamOf.get(norm(r.consultor)) ?? NO_TEAM) === team) && (consultant === ALL_CONSULTANTS || norm(r.consultor) === norm(consultant)));
-  
-  const current = matched.filter((r) => inCurrent(r, w));
-  const previous = matched.filter((r) => inPrev(r, w));
-  const cs = scored(current);
-  const ps = scored(previous);
-
-  const curAvg = avg(cs.map((r) => r.nota));
-  const prevAvg = avg(ps.map((r) => r.nota));
-  const critPct = cs.length ? (cs.filter((r) => r.concept === "Crítico").length / cs.length) * 100 : 0;
-  
-  const csatNotAnswered = csatNotAnsweredPercentage(current);
-  const hasPrev = ps.length > 0;
-
-  const rows = computeRows(people.filter((p) => (team === ALL_TEAMS || p.team === team)), records, w).filter((r) => r.audits > 0).sort((a, b) => b.score - a.score);
-  const alerts = current.filter((r) => r.flag || r.concept === "Crítico").slice(0, 8);
-
-  return (
-    <main className="content">
-      <section className="filterbar">
-        <div className="filters">
-          <Dropdown label="PERÍODO" value={period} options={PERIOD_NAMES} onChange={setPeriod} />
-          <Dropdown label="TIME" value={team} options={[ALL_TEAMS, ...teamList]} onChange={setTeam} />
-          <Dropdown label="CONSULTORES" value={consultant} options={[ALL_CONSULTANTS, ...people.map(p => p.name)]} onChange={setConsultant} />
-        </div>
-      </section>
-
-      <section className="kpis" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
-        <article className="kpi-card" onClick={() => openAudit()} style={{ cursor: "pointer" }}>
-          <div className="kpi-header"><small>NOTA MÉDIA</small><Delta value={hasPrev ? curAvg - prevAvg : null} unit=" pts" /></div>
-          <div className="kpi-body"><strong>{fmt(curAvg)}</strong><span>/ 10</span></div>
-        </article>
-        <article className="kpi-card">
-          <div className="kpi-header"><small>MONITORIAS AVALIADAS</small></div>
-          <div className="kpi-body"><strong>{cs.length}</strong></div>
-        </article>
-        <article className="kpi-card">
-          <div className="kpi-header"><small>TICKETS CRÍTICOS</small></div>
-          <div className="kpi-body"><strong>{fmt(critPct)}%</strong></div>
-        </article>
-        <article className="kpi-card">
-          <div className="kpi-header"><small>CSAT NÃO RESPONDIDO</small></div>
-          <div className="kpi-body"><strong>{csatNotAnswered.pct === null ? "—" : `${fmt(csatNotAnswered.pct)}%`}</strong></div>
-          <p>{csatNotAnswered.pct === null ? "sem registros" : `${csatNotAnswered.total - csatNotAnswered.answered} de ${csatNotAnswered.total} sem resposta`}</p>
-        </article>
-      </section>
-
-      <div className="grid-2">
-        <section className="panel"><h3>Distribuição por conceito</h3><ConceptDistribution list={cs} /></section>
-        <section className="panel"><h3>Média por parâmetro</h3><ParamBars list={cs} scorecard={scorecard} /></section>
-      </div>
-
-      <section className="panel" style={{ marginBottom: 24 }}>
-        <h3>Alertas para a liderança</h3>
-        {alerts.length === 0 ? <p className="empty">Nenhum alerta.</p> : (
-          <table>
-            <thead><tr><th>CONSULTOR</th><th>TICKET</th><th>NOTA</th><th>CONCEITO</th></tr></thead>
-            <tbody>
-              {alerts.map((r) => (
-                <tr key={r.id}><td><strong>{r.consultor}</strong></td><td>#{r.ticket}</td><td>{r.nota}</td><td><ConceptPill concept={r.concept} /></td></tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-
-      <section className="panel ranking-panel">
-        <h3>Ranking da equipe</h3>
-        <table>
-          <thead><tr><th>#</th><th>CONSULTOR</th><th>TIME</th><th>NOTA MÉDIA</th></tr></thead>
-          <tbody>
-            {rows.map((row, index) => (
-              <tr key={row.id} onClick={() => openAudit(row)} style={{ cursor: "pointer" }}>
-                <td>{index + 1}</td><td><strong>{row.name}</strong></td><td>{row.team}</td><td><strong>{fmt(row.score)}</strong> / 10</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </main>
-  );
-}
-
-function Monitorias({ records }: { records: Monitoria[] }) { return <main className="content"><div className="panel"><h3>Monitorias</h3><p className="muted">{records.length} registros.</p></div></main>; }
-function Parameters() { return <main className="content"><div className="panel"><h3>Scorecard</h3></div></main>; }
-function Team({ people }: { people: Person[] }) { return <main className="content"><div className="panel"><h3>Equipe</h3><p className="muted">{people.length} membros.</p></div></main>; }
-function Reports() { return <main className="content"><div className="panel"><h3>Relatórios</h3></div></main>; }
-function Settings() { return <main className="content"><div className="panel"><h3>Configurações</h3></div></main>; }
-
-function AuditDrawer({ person, records, close }: { person: Person | null; records: Monitoria[]; close: () => void }) {
-  const own = records.filter((r) => !person || norm(r.consultor) === norm(person.name));
-  return (
-    <div className="drawer-overlay" onClick={close}>
-      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 450 }}>
-        <h3>{person ? person.name : "Geral"}</h3>
-        <p className="muted">{own.length} monitorias no total</p>
-        <button className="secondary-button" onClick={close} style={{ marginTop: 20 }}>Fechar</button>
-      </div>
-    </div>
-  );
-}
-
-/* =====================================================================
-   APP PRINCIPAL
-   ===================================================================== */
-
-export default function App() {
-  const [page, setPage] = useState("dashboard");
-  const [auditOpen, setAuditOpen] = useState(false);
-  const [auditPerson, setAuditPerson] = useState<Person | null>(null);
-
-  const [registered] = usePersistentState<Person[]>("qualita:v2:people", []);
-  const [teams] = usePersistentState<string[]>("qualita:v3:teams", []);
-  const [scorecard] = usePersistentState<Scorecard>("qualita:v3:scorecard", DEFAULT_SCORECARD);
-  const [goals] = usePersistentState<Goals>("qualita:v3:goals", DEFAULT_GOALS);
-  const [session] = usePersistentState<SbSession | null>("qualita:v3:session", { access_token: "token", refresh_token: "", expires_at: 9999999999, email: "paulo.moura@lg.com" });
-  const [table] = usePersistentState<string>("qualita:v3:table", SB_DEFAULT_TABLE);
-
-  const source: DataSource = {
-    key: `sb|${table}`,
-    load: () => sbFetchRows(table, session!),
-  };
-
-  const [sheet, reload] = useSheet(source);
-  const records = useMemo(() => sheet.records.map((r) => r.nota === null || r.concept ? r : { ...r, concept: conceptOf(r.nota, scorecard) }), [sheet.records, scorecard]);
-  const people = useMemo(() => buildPeople(registered, records), [registered, records]);
-  const teamList = useMemo(() => buildTeamList(teams, people), [teams, people]);
-
-  return (
-    <div className="app-container">
-      <Sidebar page={page} setPage={setPage} userEmail={session?.email} />
-      <div className="workspace">
-        <Header />
-        <SourceBanner sheet={sheet} reload={reload} goSettings={() => setPage("settings")} />
-        {page === "dashboard" && <Dashboard people={people} records={records} teamList={teamList} scorecard={scorecard} goals={goals} openAudit={(p) => { setAuditPerson(p ?? null); setAuditOpen(true); }} />}
-        {page === "monitorias" && <Monitorias records={records} />}
-        {page === "parameters" && <Parameters />}
-        {page === "team" && <Team people={people} />}
-        {page === "reports" && <Reports />}
-        {page === "settings" && <Settings />}
-      </div>
-      {auditOpen && <AuditDrawer person={auditPerson} records={records} close={() => setAuditOpen(false)} />}
-    </div>
-  );
 }
