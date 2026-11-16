@@ -83,7 +83,7 @@ function parseConcept(value: string): Concept | null {
 
 const scored = (list: Monitoria[]): Scored[] => list.filter((r): r is Scored => r.nota !== null);
 
-/* Parser */
+/* Parser seguro de linhas do Supabase */
 function recordsFromRows(rows: string[][]) {
   const rawHeaders = rows[0] || [];
   const headers = rawHeaders.map(normHeader);
@@ -257,34 +257,4 @@ function AuditDrawer({ monitoria, close }: { monitoria: Monitoria | null; close:
           <div><small style={{ color: "#8f919c" }}>CONSULTOR(A)</small><div><strong>{monitoria.consultor}</strong></div></div>
           <div><small style={{ color: "#8f919c" }}>SEMANA / PERÍODO</small><div>{monitoria.week}</div></div>
           <div><small style={{ color: "#8f919c" }}>TIME</small><div>{monitoria.team || "—"}</div></div>
-          <div><small style={{ color: "#8f919c" }}>CATEGORIA</small><div>{monitoria.categoria || "—"}</div></div>
-          <div><small style={{ color: "#8f919c" }}>NOTA FINAL</small><div><strong>{monitoria.nota !== null ? fmt(monitoria.nota) : "—"} / 10</strong></div></div>
-          <div><small style={{ color: "#8f919c" }}>CONCEITO</small><div><ConceptPill concept={monitoria.concept} /></div></div>
-          <div><small style={{ color: "#8f919c" }}>STATUS CSAT</small><div>{monitoria.csat || "—"}</div></div>
-          <div><small style={{ color: "#8f919c" }}>PONTO DE ATENÇÃO / OBSERVAÇÃO</small><div style={{ background: "#121316", padding: 12, borderRadius: 6, marginTop: 4, border: "1px solid #292a31" }}>{monitoria.attention || "Nenhum ponto registrado."}</div></div>
-        </div>
-
-        <button onClick={close} style={{ marginTop: 24, background: "#745ed4", color: "#fff", border: "none", padding: "10px 16px", borderRadius: 6, cursor: "pointer", width: "100%" }}>Fechar</button>
-      </div>
-    </div>
-  );
-}
-
-export default function App() {
-  const [page, setPage] = useState("dashboard");
-  const [selectedWeek, setSelectedWeek] = useState(ALL_WEEKS);
-  const [team, setTeam] = useState(ALL_TEAMS);
-  const [consultant, setConsultant] = useState(ALL_CONSULTANTS);
-  const [activeAudit, setActiveAudit] = useState<Monitoria | null>(null);
-
-  const [registered] = usePersistentState<Person[]>("qualita:v2:people", []);
-  const [teams] = usePersistentState<string[]>("qualita:v3:teams", []);
-  const [scorecard] = usePersistentState<Scorecard>("qualita:v3:scorecard", DEFAULT_SCORECARD);
-  const [table] = usePersistentState<string>("qualita:v3:table", SB_DEFAULT_TABLE);
-
-  const [sheet, reload] = useSheet(table);
-  const records = useMemo(() => sheet.records.map((r) => r.nota === null || r.concept ? r : { ...r, concept: conceptOf(r.nota, scorecard) }), [sheet.records, scorecard]);
-  const people = useMemo(() => buildPeople(registered, records), [registered, records]);
-  const teamList = useMemo(() => buildTeamList(teams, people), [teams, people]);
-  
-  const weekList =
+          <div><small style={{ color: "#8f919c" }}>CATEGORIA</small
