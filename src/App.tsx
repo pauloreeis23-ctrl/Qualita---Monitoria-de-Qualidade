@@ -256,8 +256,6 @@ function usePersistentState<T>(key: string, initial: T) {
    REGRAS DO SCORECARD
    ===================================================================== */
 
-/* Total proporcional: pontos obtidos ÷ pontos possíveis × 10, arredondado para o inteiro mais próximo.
-   Parâmetros "-" (null) saem do cálculo. */
 function totalFromScores(scores: (number | null)[]): number | null {
   const applicable = scores.filter((s): s is number => s !== null);
   if (applicable.length === 0) return null;
@@ -306,16 +304,26 @@ function csatClass(value: string): "pos" | "neg" | null {
   return null;
 }
 
-function csatOf(list: Monitoria[]): { rate: number | null; answered: number } {
-  let pos = 0;
-  let neg = 0;
-  list.forEach((r) => {
-    const c = csatClass(r.csat);
-    if (c === "pos") pos++;
-    else if (c === "neg") neg++;
+function csatNotAnsweredPercentage(list: Monitoria[]): { pct: number | null; answered: number; total: number } {
+  const validList = list.filter((r) => !r.disregarded);
+  if (validList.length === 0) return { pct: null, answered: 0, total: 0 };
+
+  let notAnsweredCount = 0;
+  let answeredCount = 0;
+
+  validList.forEach((r) => {
+    const s = norm(r.csat);
+    // Considera não respondido se estiver vazio, "-" ou contiver palavras indicando ausência de resposta
+    const isBlank = !s || s === "—" || /sem resposta|nao respondido|n\/a|vazio|-/.test(s);
+    if (isBlank) {
+      notAnsweredCount++;
+    } else {
+      answeredCount++;
+    }
   });
-  const answered = pos + neg;
-  return { rate: answered ? (pos / answered) * 100 : null, answered };
+
+  const pct = (notAnsweredCount / validList.length) * 100;
+  return { pct, answered: answeredCount, total: validList.length };
 }
 
 const scored = (list: Monitoria[]): Scored[] => list.filter((r): r is Scored => r.nota !== null);
@@ -342,7 +350,6 @@ function getWindow(period: string, now: number): Win {
   return { from: now - days * DAY, to: Infinity, prevFrom: now - 2 * days * DAY, prevTo: now - days * DAY, hasPrev: true };
 }
 
-/* Registros sem data entram sempre no período atual (e nunca no anterior) */
 const inCurrent = (r: Monitoria, w: Win) => r.date === null || (r.date >= w.from && r.date < w.to);
 const inPrev = (r: Monitoria, w: Win) => w.hasPrev && r.date !== null && r.date >= w.prevFrom && r.date < w.prevTo;
 
@@ -350,7 +357,6 @@ const inPrev = (r: Monitoria, w: Win) => w.hasPrev && r.date !== null && r.date 
    LEITURA DO GOOGLE SHEETS (CSV)
    ===================================================================== */
 
-/* Aceita o link "Publicar na web" (CSV) ou o link normal da planilha (precisa estar como "qualquer pessoa com o link") */
 function resolveSheetUrl(raw: string): string {
   let url = raw.trim();
   if (!url) return "";
@@ -475,7 +481,6 @@ function parseDateCell(value: string): number | null {
   return new Date(year, month - 1, day).getTime();
 }
 
-/* Célula de parâmetro: 0, 1 ou 2; qualquer outra coisa ("-", vazio, N/A) vira null = não se aplica */
 function parseScoreCell(value: string): number | null {
   const n = parseNumber(value);
   return n === 0 || n === 1 || n === 2 ? n : null;
@@ -487,7 +492,6 @@ function recordsFromCSV(text: string) {
   return recordsFromRows(parseCSV(text));
 }
 
-/* rows[0] = cabeçalhos; demais linhas = dados. Serve para CSV e para tabelas do Supabase. */
 function recordsFromRows(rows: string[][]) {
   const keysOf = (field: string) => FIELDS.find((f) => f.field === field)!.keys;
   const paramFields = ["p1", "p2", "p3", "p4", "p5"];
@@ -564,7 +568,6 @@ function recordsFromRows(rows: string[][]) {
       scores: disregarded ? null : scores,
       nota,
       concept: disregarded ? null : parseConcept(conceptText),
-      /* Só conta como "prioridade possivelmente rebaixada"; TICKET_CRITICO e REVISAR_P2_P3... têm tratamento próprio */
       flag: /rebaix/.test(alertText) || (alertText !== "" && !NO_ALERT.includes(alertText) && !/critic|revisar/.test(alertText)),
       disregarded,
       attention: get(idx.atencao),
@@ -575,7 +578,6 @@ function recordsFromRows(rows: string[][]) {
     throw new Error("Encontrei as colunas, mas nenhuma linha tem consultor e nota válidos.");
   }
 
-  /* A nota do processo vai de 0 a 10. Se a planilha usar 0 a 100, converte. */
   const values = raw.map((x) => x.nota).filter((n): n is number => n !== null);
   const max = values.length ? Math.max(...values) : 0;
   const factor = max > 10 ? 0.1 : 1;
@@ -586,7 +588,7 @@ function recordsFromRows(rows: string[][]) {
 }
 
 /* =====================================================================
-   DADOS DE DEMONSTRAÇÃO (usados só enquanto nenhuma planilha estiver conectada)
+   DADOS DE DEMONSTRAÇÃO
    ===================================================================== */
 
 const DEMO_TEAMS = ["Torre Safira", "Torre Esmeralda", "Torre Rubi"];
@@ -685,11 +687,9 @@ const DEMO_STATE: SheetState = {
 };
 
 /* =====================================================================
-   SUPABASE (leitura via REST + login por e-mail e senha) E HOOK DE DADOS
+   SUPABASE E HOOK DE DADOS
    ===================================================================== */
 
-/* A chave "publishable" foi feita para ficar no navegador: o que protege os dados são as políticas (RLS)
-   do Supabase. NUNCA coloque aqui a chave "secret" ou "service_role". */
 const SB_URL: string = String((import.meta as any).env?.VITE_SUPABASE_URL ?? "https://xkrlnvksgouijbwvtphq.supabase.co")
   .trim()
   .replace(/\/+$/, "")
@@ -700,11 +700,9 @@ const SB_KEY: string = String(
 const SB_DEFAULT_TABLE = "monitorias";
 
 type SbSession = { access_token: string; refresh_token: string; expires_at: number; email: string };
-
 type DataSource = { key: string; load: (() => Promise<string[][]>) | null };
 
 class AuthExpiredError extends Error {}
-
 const SB_NETWORK_ERROR = "Não foi possível falar com o Supabase. Confira a internet e a URL do projeto.";
 
 function sbSessionFrom(data: any, fallbackEmail: string): SbSession {
@@ -754,7 +752,6 @@ async function sbRefresh(session: SbSession): Promise<SbSession> {
   return sbSessionFrom(await res.json(), session.email);
 }
 
-/* Devolve sempre um token válido, renovando a sessão quando está perto de expirar */
 function makeTokenGetter(session: SbSession, onRefresh: (s: SbSession) => void) {
   let current = session;
   return async () => {
@@ -765,11 +762,10 @@ function makeTokenGetter(session: SbSession, onRefresh: (s: SbSession) => void) 
   };
 }
 
-/* Lê a tabela inteira (em páginas de 1.000) e devolve no mesmo formato de um CSV: linha 0 = cabeçalhos */
 async function sbFetchRows(table: string, getToken: () => Promise<string>): Promise<string[][]> {
   const pageSize = 1000;
   const all: Record<string, unknown>[] = [];
-  let order = "&order=id.asc"; // dá ordem estável entre páginas; se a tabela não tiver "id", tenta sem ordem
+  let order = "&order=id.asc";
   let offset = 0;
 
   while (offset < 200000) {
@@ -876,7 +872,6 @@ function useSheet(source: DataSource) {
           : "Erro desconhecido ao ler os dados.";
       setState((s) => ({ ...s, status: "error", message, authExpired: err instanceof AuthExpiredError }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source.key]);
 
   useEffect(() => {
@@ -891,7 +886,6 @@ function useSheet(source: DataSource) {
    ===================================================================== */
 
 function buildPeople(registered: Person[], records: Monitoria[]): Person[] {
-  /* Se o mesmo nome aparecer duas vezes, o cadastro mais recente (último da lista) vence */
   const known = new Map<string, Person>();
   registered.forEach((p) => known.set(norm(p.name), p));
   records.forEach((r) => {
@@ -1314,7 +1308,9 @@ function Dashboard({
   const prevAvg = avg(ps.map((r) => r.nota));
   const critPct = cs.length ? (cs.filter((r) => r.concept === "Crítico").length / cs.length) * 100 : 0;
   const prevCritPct = ps.length ? (ps.filter((r) => r.concept === "Crítico").length / ps.length) * 100 : 0;
-  const csat = csatOf(current);
+  
+  // Cálculo atualizado para CSAT não respondido
+  const csatNotAnswered = csatNotAnsweredPercentage(current);
   const hasPrev = ps.length > 0;
   const disregardedCount = current.length - cs.length;
 
@@ -1402,17 +1398,19 @@ function Dashboard({
         </article>
         <article className="kpi-card">
           <div className="kpi-header">
-            <small>CSAT</small>
-            {csat.rate !== null && (
-              <span className={csat.rate >= goals.csat ? "positive" : "negative"}>
-                {csat.rate >= goals.csat ? "na meta" : "abaixo da meta"}
+            <small>CSAT NÃO RESPONDIDO</small>
+            {csatNotAnswered.pct !== null && (
+              <span className={csatNotAnswered.pct <= (100 - goals.csat) ? "positive" : "negative"}>
+                {csatNotAnswered.pct <= (100 - goals.csat) ? "dentro do limite" : "acima do limite"}
               </span>
             )}
           </div>
-          <div className="kpi-body"><strong>{csat.rate === null ? "—" : `${fmt(csat.rate)}%`}</strong></div>
+          <div className="kpi-body">
+            <strong>{csatNotAnswered.pct === null ? "—" : `${fmt(csatNotAnswered.pct)}%`}</strong>
+          </div>
           <p>
-            meta {goals.csat}% ·{" "}
-            {csat.rate === null ? "sem respostas reconhecidas na coluna CSAT" : `${csat.answered} respostas`}
+            meta {goals.csat}% respondidos ·{" "}
+            {csatNotAnswered.pct === null ? "sem registros" : `${csatNotAnswered.total - csatNotAnswered.answered} de ${csatNotAnswered.total} sem resposta`}
           </p>
         </article>
       </section>
@@ -1501,1412 +1499,4 @@ function Dashboard({
               </thead>
               <tbody>
                 {rows.map((row, index) => (
-                  <tr key={row.id} onClick={() => openAudit(row)} style={{ cursor: "pointer" }}>
-                    <td><span className={`rank rank-${index + 1}`}>{index + 1}</span></td>
-                    <td>
-                      <div className="agent">
-                        <span className="avatar" style={{ background: row.color }}>{row.initials}</span>
-                        <strong>{row.name}</strong>
-                      </div>
-                    </td>
-                    <td>{row.team}</td>
-                    <td>{row.audits}</td>
-                    <td>
-                      <strong style={{ color: CONCEPT_COLORS[conceptOf(Math.round(row.score), scorecard)] }}>{fmt(row.score)}</strong> / 10
-                    </td>
-                    <td><Delta value={row.trend} unit=" pts" /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-    </main>
-  );
-}
-
-/* =====================================================================
-   MONITORIAS (tabela da planilha)
-   ===================================================================== */
-
-function Monitorias({ records }: { records: Monitoria[] }) {
-  const [search, setSearch] = useState("");
-  const [period, setPeriod] = useState("Todo o período");
-  const [limit, setLimit] = useState(100);
-
-  const w = getWindow(period, Date.now());
-  const q = norm(search);
-  const showParams = records.some((r) => r.scores);
-
-  const list = records
-    .filter((r) => inCurrent(r, w))
-    .filter((r) => !q || norm(`${r.consultor} ${r.ticket} ${r.categoria}`).includes(q))
-    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
-
-  return (
-    <main className="content">
-      <div className="page-actions" style={{ marginBottom: 16 }}>
-        <div className="filters">
-          <Dropdown label="PERÍODO" value={period} options={PERIOD_NAMES} onChange={(v) => { setPeriod(v); setLimit(100); }} />
-          <input
-            className="input search"
-            placeholder="Buscar consultor, ticket ou categoria"
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setLimit(100); }}
-          />
-        </div>
-        <span className="muted-text">{list.length.toLocaleString("pt-BR")} linhas</span>
-      </div>
-
-      <div className="panel">
-        {list.length === 0 ? (
-          <p className="empty">Nenhuma monitoria encontrada.</p>
-        ) : (
-          <>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>SEMANA</th>
-                    <th>CONSULTOR(A)</th>
-                    <th>CATEGORIA</th>
-                    <th>TICKET</th>
-                    {showParams && [1, 2, 3, 4, 5].map((n) => <th key={n} title="Parâmetro">P{n}</th>)}
-                    <th>NOTA</th>
-                    <th>CONCEITO</th>
-                    <th>CSAT</th>
-                    <th>ALERTA</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {list.slice(0, limit).map((m) => (
-                    <tr key={m.id}>
-                      <td>{m.week || "—"}</td>
-                      <td><strong>{m.consultor}</strong></td>
-                      <td>{m.categoria || "—"}</td>
-                      <td>{m.ticket ? <span className="ticket">#{m.ticket}</span> : "—"}</td>
-                      {showParams &&
-                        [0, 1, 2, 3, 4].map((i) => (
-                          <td key={i}>{m.scores ? <ScoreCell value={m.scores[i]} /> : "—"}</td>
-                        ))}
-                      <td>{m.disregarded ? <span className="muted-text">Desconsiderado</span> : <strong>{fmt(m.nota ?? 0, 0)}</strong>}</td>
-                      <td><ConceptPill concept={m.concept} /></td>
-                      <td>{m.csat || "—"}</td>
-                      <td>{m.flag ? <span className="negative">Prioridade</span> : "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {list.length > limit && (
-              <div style={{ textAlign: "center", marginTop: 16 }}>
-                <button className="secondary-button" onClick={() => setLimit(limit + 100)}>
-                  Mostrar mais ({list.length - limit} restantes)
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </main>
-  );
-}
-
-/* =====================================================================
-   PARÂMETROS (scorecard do Processo de Monitoria)
-   ===================================================================== */
-
-function Parameters({
-  scorecard,
-  setScorecard,
-}: {
-  scorecard: Scorecard;
-  setScorecard: (sc: Scorecard) => void;
-}) {
-  const [tab, setTab] = useState<"params" | "scale" | "sim">("params");
-  const [editing, setEditing] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [sim, setSim] = useState<(number | null)[]>([2, 2, 2, 2, 2]);
-  const [payroll, setPayroll] = useState(false);
-
-  const updateParam = (id: number, patch: Partial<Param>) =>
-    setScorecard({ ...scorecard, params: scorecard.params.map((p) => (p.id === id ? { ...p, ...patch } : p)) });
-
-  const setThreshold = (key: "excellentMin" | "adequateMin" | "attentionMin", value: number) => {
-    const next = { ...scorecard, [key]: value };
-    if (next.excellentMin > next.adequateMin && next.adequateMin > next.attentionMin && next.attentionMin >= 1) {
-      setScorecard(next);
-    }
-  };
-
-  const reset = () => {
-    setScorecard(DEFAULT_SCORECARD);
-    setConfirmReset(false);
-    setEditing(false);
-  };
-
-  const applicable = sim.filter((s): s is number => s !== null);
-  const obtained = applicable.reduce((a, b) => a + b, 0);
-  const possible = applicable.length * 2;
-  const simTotal = totalFromScores(sim);
-  const simConcept: Concept | null = payroll ? "Crítico" : simTotal === null ? null : conceptOf(simTotal, scorecard);
-
-  const thresholdOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-  return (
-    <main className="content parameters-page">
-      <div className="panel" style={{ marginBottom: 20 }}>
-        <div className="page-actions">
-          <div>
-            <h3>Scorecard {scorecard.version}</h3>
-            <p className="muted">
-              5 parâmetros, cada um vale 0 (não atende), 1 (parcial) ou 2 (atende plenamente). Total de 0 a 10 pontos por ticket.
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {editing && (confirmReset ? (
-              <>
-                <button className="secondary-button" onClick={() => setConfirmReset(false)}>Cancelar</button>
-                <button className="danger-button" onClick={reset}>Confirmar restauração</button>
-              </>
-            ) : (
-              <button className="secondary-button" onClick={() => setConfirmReset(true)}>Restaurar padrão V4</button>
-            ))}
-            <button className={editing ? "primary-button" : "secondary-button"} onClick={() => { setEditing(!editing); setConfirmReset(false); }}>
-              {editing ? "Concluir edição" : "Editar scorecard"}
-            </button>
-          </div>
-        </div>
-        {editing && (
-          <div className="notice">
-            Modo de edição: mudanças no scorecard só entram em vigor oficialmente após aprovação da diretoria de atendimento (processo, seção 7).
-          </div>
-        )}
-      </div>
-
-      <Tabs
-        tabs={[
-          { id: "params", label: "Parâmetros" },
-          { id: "scale", label: "Régua e regras" },
-          { id: "sim", label: "Simulador" },
-        ]}
-        value={tab}
-        onChange={setTab}
-      />
-
-      {tab === "params" && (
-        <div style={{ display: "grid", gap: 16 }}>
-          {scorecard.params.map((p) => (
-            <section key={p.id} className="param-card">
-              <div className="param-head">
-                <span className="param-num">{p.id}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  {editing ? (
-                    <input className="input" value={p.name} onChange={(e) => updateParam(p.id, { name: e.target.value })} />
-                  ) : (
-                    <h4>{p.name}</h4>
-                  )}
-                  {editing ? (
-                    <textarea
-                      className="input"
-                      rows={2}
-                      style={{ marginTop: 8 }}
-                      value={p.evaluates}
-                      onChange={(e) => updateParam(p.id, { evaluates: e.target.value })}
-                    />
-                  ) : (
-                    <p className="muted">{p.evaluates}</p>
-                  )}
-                </div>
-                {editing ? (
-                  <label className="check">
-                    <input type="checkbox" checked={p.canBeNA} onChange={(e) => updateParam(p.id, { canBeNA: e.target.checked })} />
-                    pode ser “-”
-                  </label>
-                ) : (
-                  p.canBeNA && <span className="badge ok">pode ser “-”</span>
-                )}
-              </div>
-
-              <div className="rubric-grid">
-                {(
-                  [
-                    ["full", "2 pontos · Atende", p.full],
-                    ["partial", "1 ponto · Parcial", p.partial],
-                    ["none", "0 ponto · Não atende", p.none],
-                  ] as const
-                ).map(([key, label, text]) => (
-                  <div key={key} className={`rubric ${key}`}>
-                    <small>{label.toUpperCase()}</small>
-                    {editing ? (
-                      <textarea
-                        className="input"
-                        rows={3}
-                        value={text}
-                        onChange={(e) => updateParam(p.id, { [key]: e.target.value } as Partial<Param>)}
-                      />
-                    ) : (
-                      <p>{text}</p>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <div className="param-rule">
-                <small>REGRA ESPECÍFICA</small>
-                {editing ? (
-                  <textarea className="input" rows={3} value={p.rule} onChange={(e) => updateParam(p.id, { rule: e.target.value })} />
-                ) : (
-                  <p>{p.rule}</p>
-                )}
-              </div>
-            </section>
-          ))}
-        </div>
-      )}
-
-      {tab === "scale" && (
-        <>
-          <section className="panel">
-            <h3>Régua de conceitos</h3>
-            <p className="muted">O conceito é sempre calculado a partir da nota total (0 a 10).</p>
-            <div className="concept-cards">
-              {CONCEPTS.map((c) => (
-                <div key={c} className="concept-card" style={{ borderColor: `${CONCEPT_COLORS[c]}66` }}>
-                  <ConceptPill concept={c} />
-                  <strong className="concept-range">{rangeLabel(c, scorecard)}</strong>
-                  <p>{CONCEPT_READING[c]}</p>
-                </div>
-              ))}
-            </div>
-            {editing && (
-              <div className="inline-form">
-                {(
-                  [
-                    ["excellentMin", "EXCELENTE A PARTIR DE"],
-                    ["adequateMin", "ADEQUADO A PARTIR DE"],
-                    ["attentionMin", "ATENÇÃO A PARTIR DE"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <div key={key}>
-                    <label className="field-label">{label}</label>
-                    <select className="input" value={scorecard[key]} onChange={(e) => setThreshold(key, Number(e.target.value))}>
-                      {thresholdOptions.map((n) => <option key={n} value={n}>{n}</option>)}
-                    </select>
-                  </div>
-                ))}
-                <p className="muted" style={{ fontSize: 12, flexBasis: "100%", margin: 0 }}>
-                  Os limites precisam ficar em ordem decrescente (Excelente &gt; Adequado &gt; Atenção). Valores inválidos são ignorados.
-                </p>
-              </div>
-            )}
-          </section>
-
-          <section className="panel" style={{ marginTop: 20 }}>
-            <h3>Cálculo da nota</h3>
-            <p className="muted">
-              Soma dos 5 parâmetros (0 a 10). Quando algum parâmetro não se aplica (“-”), a nota é proporcional: pontos obtidos ÷ pontos
-              possíveis × 10, arredondada para o inteiro mais próximo.
-            </p>
-            <div className="rule-block" style={{ marginTop: 12 }}>
-              <strong>Exemplo:</strong> 5 de 6 pontos possíveis = 5 ÷ 6 × 10 = 8,33, que arredonda para <strong>8</strong>.
-            </div>
-            <p className="muted" style={{ fontSize: 12 }}>
-              Quando o resultado cair exatamente em meio ponto (2,5 ou 7,5), a ferramenta arredonda para cima.
-            </p>
-          </section>
-
-          <section className="panel" style={{ marginTop: 20 }}>
-            <h3>Regras gerais da avaliação</h3>
-            <ul className="rules-list">
-              {GENERAL_RULES.map((r) => <li key={r}>{r}</li>)}
-            </ul>
-          </section>
-        </>
-      )}
-
-      {tab === "sim" && (
-        <section className="panel">
-          <h3>Simulador de nota</h3>
-          <p className="muted">Escolha a nota de cada parâmetro e veja o total e o conceito, com as mesmas regras do processo.</p>
-          <div className="sim-grid" style={{ marginTop: 16 }}>
-            {scorecard.params.map((p, i) => {
-              const options: (number | null)[] = p.canBeNA ? [0, 1, 2, null] : [0, 1, 2];
-              return (
-                <div key={p.id} className="sim-item">
-                  <span>{p.id}. {p.name}</span>
-                  <div className="seg">
-                    {options.map((v) => (
-                      <button
-                        key={String(v)}
-                        className={sim[i] === v ? "on" : ""}
-                        onClick={() => setSim(sim.map((s, j) => (j === i ? v : s)))}
-                      >
-                        {v === null ? "-" : v}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <label className="check" style={{ marginTop: 16 }}>
-            <input type="checkbox" checked={payroll} onChange={(e) => setPayroll(e.target.checked)} />
-            Prioridade/FLAG rebaixada indevidamente em caso com impacto em folha de pagamento
-          </label>
-
-          <div className="sim-result">
-            <span>
-              {possible === 0 ? "Sem pontos possíveis" : `${obtained} de ${possible} pontos`}
-              {possible > 0 && possible < 10 ? " (proporcional)" : ""}
-            </span>
-            <strong>{simTotal === null ? "—" : simTotal} / 10</strong>
-            <ConceptPill concept={simConcept} />
-          </div>
-          {payroll && (
-            <p className="muted" style={{ fontSize: 12 }}>
-              Exceção do processo: prioridade rebaixada indevidamente em caso de folha leva o ticket direto para Crítico, independentemente do total.
-            </p>
-          )}
-        </section>
-      )}
-    </main>
-  );
-}
-
-/* =====================================================================
-   EQUIPE (Times + Colaboradores)
-   ===================================================================== */
-
-function Team({
-  people,
-  records,
-  teams,
-  teamList,
-  setTeams,
-  assignTeam,
-  openAudit,
-}: {
-  people: Person[];
-  records: Monitoria[];
-  teams: string[];
-  teamList: string[];
-  setTeams: (teams: string[]) => void;
-  assignTeam: (name: string, team: string) => void;
-  openAudit: (person?: Person) => void;
-}) {
-  const [view, setView] = useState<"teams" | "people">("teams");
-  const [modal, setModal] = useState<"none" | "team" | "person">("none");
-  const [teamFilter, setTeamFilter] = useState(ALL_TEAMS);
-  const [success, setSuccess] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [teamName, setTeamName] = useState("");
-  const [personName, setPersonName] = useState("");
-  const [personTeam, setPersonTeam] = useState(NO_TEAM);
-  const [error, setError] = useState("");
-
-  const rows = computeRows(people, records, getWindow("Todo o período", Date.now()));
-  const realTeams = teamList.filter((t) => t !== NO_TEAM);
-
-  const closeModal = () => {
-    setModal("none");
-    setError("");
-    setTeamName("");
-    setPersonName("");
-  };
-
-  const addTeam = (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = teamName.trim().replace(/\s+/g, " ");
-    if (!clean) return setError("Informe o nome do time.");
-    if (clean === NO_TEAM || teamList.some((t) => norm(t) === norm(clean))) return setError("Já existe um time com esse nome.");
-    setTeams([...teams, clean]);
-    setSuccess(`Time "${clean}" cadastrado com sucesso.`);
-    closeModal();
-  };
-
-  const deleteTeam = (name: string) => {
-    setTeams(teams.filter((t) => t !== name));
-    setConfirmDelete(null);
-    setSuccess(`Time "${name}" excluído.`);
-  };
-
-  const addPerson = (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = personName.trim().replace(/\s+/g, " ");
-    if (!clean) return setError("Informe o nome do colaborador.");
-    const existing = people.find((p) => norm(p.name) === norm(clean));
-    assignTeam(existing ? existing.name : clean, personTeam);
-    setSuccess(
-      existing
-        ? `${existing.name} já existia; o time foi atualizado para ${personTeam}.`
-        : `${clean} foi cadastrado(a) em ${personTeam}.`
-    );
-    closeModal();
-  };
-
-  const teamStats = teamList.map((name) => {
-    const members = rows.filter((r) => r.team === name);
-    return {
-      name,
-      members,
-      audits: members.reduce((sum, m) => sum + m.audits, 0),
-      score: members.some((m) => m.audits) ? weightedScore(members) : null,
-    };
-  });
-
-  const peopleRows = rows
-    .filter((r) => teamFilter === ALL_TEAMS || r.team === teamFilter)
-    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
-
-  return (
-    <main className="content">
-      <Tabs
-        tabs={[
-          { id: "teams", label: `Times (${teamList.length})` },
-          { id: "people", label: `Colaboradores (${people.length})` },
-        ]}
-        value={view}
-        onChange={(v) => {
-          setView(v);
-          setSuccess("");
-        }}
-      />
-
-      {success && <div className="notice success" style={{ marginTop: 0, marginBottom: 16 }}>{success}</div>}
-
-      {view === "teams" && (
-        <>
-          <section className="kpis">
-            <article className="kpi-card">
-              <div className="kpi-header"><small>TIMES ATIVOS</small></div>
-              <div className="kpi-body"><strong>{realTeams.length}</strong></div>
-            </article>
-            <article className="kpi-card">
-              <div className="kpi-header"><small>COLABORADORES</small></div>
-              <div className="kpi-body"><strong>{people.length}</strong></div>
-            </article>
-            <article className="kpi-card">
-              <div className="kpi-header"><small>NOTA MÉDIA GERAL</small></div>
-              <div className="kpi-body"><strong>{fmt(weightedScore(rows))}</strong><span>/ 10</span></div>
-            </article>
-          </section>
-
-          <div className="page-actions" style={{ marginBottom: 16 }}>
-            <h3>Times</h3>
-            <button
-              className="primary-button"
-              onClick={() => {
-                setSuccess("");
-                setModal("team");
-              }}
-            >
-              + Cadastrar novo time
-            </button>
-          </div>
-
-          {teamStats.length === 0 ? (
-            <div className="panel"><p className="empty">Nenhum time cadastrado. Clique em “+ Cadastrar novo time”.</p></div>
-          ) : (
-            <div className="team-grid">
-              {teamStats.map((t) => (
-                <div key={t.name} className="team-card">
-                  <div className="team-card-head">
-                    <h4>{t.name}</h4>
-                    <span className="badge ok">{t.members.length} {t.members.length === 1 ? "pessoa" : "pessoas"}</span>
-                  </div>
-                  <div className="avatar-stack">
-                    {t.members.slice(0, 6).map((m) => (
-                      <span key={m.id} className="avatar" style={{ background: m.color }} title={m.name}>{m.initials}</span>
-                    ))}
-                    {t.members.length === 0 && <span className="muted" style={{ fontSize: 13 }}>Sem colaboradores ainda</span>}
-                  </div>
-                  {t.name === NO_TEAM && (
-                    <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-                      Consultores da planilha ainda sem time. Atribua um time na aba Colaboradores.
-                    </p>
-                  )}
-                  <div className="team-metrics">
-                    <div><small>MONITORIAS</small><strong>{t.audits}</strong></div>
-                    <div><small>NOTA MÉDIA</small><strong>{t.score === null ? "—" : fmt(t.score)}</strong></div>
-                  </div>
-                  <div className="team-actions">
-                    <button
-                      className="secondary-button"
-                      onClick={() => {
-                        setTeamFilter(t.name);
-                        setView("people");
-                        setSuccess("");
-                      }}
-                    >
-                      Ver colaboradores
-                    </button>
-                    {t.members.length === 0 &&
-                      t.name !== NO_TEAM &&
-                      (confirmDelete === t.name ? (
-                        <button className="danger-button" onClick={() => deleteTeam(t.name)}>Confirmar</button>
-                      ) : (
-                        <button className="danger-button" onClick={() => setConfirmDelete(t.name)}>Excluir</button>
-                      ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-
-      {view === "people" && (
-        <>
-          <div className="page-actions" style={{ marginBottom: 16 }}>
-            <Dropdown label="TIME" value={teamFilter} options={[ALL_TEAMS, ...teamList]} onChange={setTeamFilter} />
-            <button
-              className="primary-button"
-              onClick={() => {
-                setSuccess("");
-                setPersonTeam(teamFilter !== ALL_TEAMS ? teamFilter : realTeams[0] ?? NO_TEAM);
-                setModal("person");
-              }}
-            >
-              + Cadastrar novo colaborador
-            </button>
-          </div>
-
-          <div className="panel">
-            {peopleRows.length === 0 ? (
-              <p className="empty">Nenhum colaborador neste filtro.</p>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>COLABORADOR</th>
-                      <th>TIME</th>
-                      <th>MONITORIAS</th>
-                      <th>NOTA MÉDIA</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {peopleRows.map((a) => (
-                      <tr key={a.id} onClick={() => openAudit(a)} style={{ cursor: "pointer" }}>
-                        <td>
-                          <div className="agent">
-                            <span className="avatar" style={{ background: a.color }}>{a.initials}</span>
-                            <strong>{a.name}</strong>
-                          </div>
-                        </td>
-                        <td onClick={(e) => e.stopPropagation()}>
-                          <select
-                            className="input inline-select"
-                            value={a.team}
-                            onChange={(e) => assignTeam(a.name, e.target.value)}
-                          >
-                            {[NO_TEAM, ...realTeams].map((t) => <option key={t}>{t}</option>)}
-                          </select>
-                        </td>
-                        <td>{a.audits}</td>
-                        <td>{a.audits ? <><strong>{fmt(a.score)}</strong> / 10</> : "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </>
-      )}
-
-      {modal === "team" && (
-        <div className="drawer-overlay" onClick={closeModal}>
-          <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
-            <h3>Cadastrar novo time</h3>
-            <p className="muted" style={{ fontSize: 13 }}>Depois de criado, o time aparece nos filtros e no cadastro de colaboradores.</p>
-            <form onSubmit={addTeam} style={{ marginTop: 20, display: "grid", gap: 14 }}>
-              <div>
-                <label className="field-label">NOME DO TIME</label>
-                <input
-                  className="input"
-                  autoFocus
-                  value={teamName}
-                  onChange={(e) => {
-                    setTeamName(e.target.value);
-                    setError("");
-                  }}
-                  placeholder="Ex: Torre Ametista"
-                />
-              </div>
-              {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
-              <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-                <button type="button" className="secondary-button" style={{ flex: 1 }} onClick={closeModal}>Cancelar</button>
-                <button type="submit" className="primary-button" style={{ flex: 1 }}>Salvar</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {modal === "person" && (
-        <div className="drawer-overlay" onClick={closeModal}>
-          <div className="drawer" style={{ width: 400 }} onClick={(e) => e.stopPropagation()}>
-            <h3>Cadastrar novo colaborador</h3>
-            <p className="muted" style={{ fontSize: 13 }}>
-              Informe o nome e o time. Se o nome for igual ao da planilha, as monitorias dele aparecem automaticamente.
-            </p>
-            <form onSubmit={addPerson} style={{ marginTop: 20, display: "grid", gap: 14 }}>
-              <div>
-                <label className="field-label">NOME COMPLETO</label>
-                <input
-                  className="input"
-                  autoFocus
-                  value={personName}
-                  onChange={(e) => {
-                    setPersonName(e.target.value);
-                    setError("");
-                  }}
-                  placeholder="Ex: Juliana Souza"
-                />
-              </div>
-              <div>
-                <label className="field-label">TIME</label>
-                <select className="input" value={personTeam} onChange={(e) => setPersonTeam(e.target.value)}>
-                  {[NO_TEAM, ...realTeams].map((t) => <option key={t}>{t}</option>)}
-                </select>
-              </div>
-              {error && <p className="negative" style={{ margin: 0 }}>{error}</p>}
-              <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-                <button type="button" className="secondary-button" style={{ flex: 1 }} onClick={closeModal}>Cancelar</button>
-                <button type="submit" className="primary-button" style={{ flex: 1 }}>Salvar</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </main>
-  );
-}
-
-/* =====================================================================
-   RELATÓRIO SEMANAL
-   ===================================================================== */
-
-function Reports({
-  people,
-  records,
-  teamList,
-  scorecard,
-  goals,
-}: {
-  people: Person[];
-  records: Monitoria[];
-  teamList: string[];
-  scorecard: Scorecard;
-  goals: Goals;
-}) {
-  const [period, setPeriod] = useState("Semana anterior");
-  const w = getWindow(period, Date.now());
-
-  const list = records.filter((r) => inCurrent(r, w));
-  const prevList = records.filter((r) => inPrev(r, w));
-  const cs = scored(list);
-  const ps = scored(prevList);
-
-  const avgNow = avg(cs.map((r) => r.nota));
-  const avgPrev = avg(ps.map((r) => r.nota));
-  const csat = csatOf(list);
-  const criticalCount = cs.filter((r) => r.concept === "Crítico").length;
-  const alerts = list
-    .filter((r) => r.flag || r.concept === "Crítico")
-    .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
-
-  const teamOf = new Map(people.map((p) => [norm(p.name), p.team]));
-  const teamRows = teamList.map((t) => {
-    const items = cs.filter((r) => (teamOf.get(norm(r.consultor)) ?? NO_TEAM) === t);
-    return { name: t, count: items.length, score: avg(items.map((r) => r.nota)), counts: conceptCounts(items) };
-  });
-
-  const byCategory = new Map<string, Scored[]>();
-  cs.forEach((r) => {
-    const key = r.categoria || "Sem categoria";
-    const arr = byCategory.get(key);
-    if (arr) arr.push(r);
-    else byCategory.set(key, [r]);
-  });
-  const categoryRows = Array.from(byCategory.entries())
-    .map(([name, items]) => ({
-      name,
-      count: items.length,
-      score: avg(items.map((i) => i.nota)),
-      critical: items.filter((i) => i.concept === "Crítico").length,
-    }))
-    .sort((a, b) => b.count - a.count);
-
-  const periodNote =
-    period === "Semana anterior"
-      ? `${fmtDate(w.from)} a ${fmtDate(w.to - DAY)}`
-      : period === "Todo o período"
-      ? "histórico completo"
-      : period.toLowerCase();
-
-  return (
-    <main className="content">
-      <div className="page-actions" style={{ marginBottom: 16 }}>
-        <Dropdown label="PERÍODO" value={period} options={PERIOD_NAMES} onChange={setPeriod} />
-        <span className="muted-text">Período do relatório: {periodNote}</span>
-      </div>
-
-      <section className="kpis" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
-        <article className="kpi-card">
-          <div className="kpi-header"><small>TICKETS AVALIADOS</small></div>
-          <div className="kpi-body"><strong>{cs.length.toLocaleString("pt-BR")}</strong></div>
-          <p>{list.length - cs.length > 0 ? `${list.length - cs.length} desconsiderado(s)` : "100% pontuados"}</p>
-        </article>
-        <article className="kpi-card">
-          <div className="kpi-header">
-            <small>NOTA MÉDIA (DE 10)</small>
-            <Delta value={ps.length ? avgNow - avgPrev : null} unit=" pts" />
-          </div>
-          <div className="kpi-body"><strong>{fmt(avgNow)}</strong></div>
-          <p>{ps.length ? `vs. ${fmt(avgPrev)} no período anterior` : "sem período anterior"}</p>
-        </article>
-        <article className="kpi-card">
-          <div className="kpi-header">
-            <small>CSAT</small>
-            {csat.rate !== null && (
-              <span className={csat.rate >= goals.csat ? "positive" : "negative"}>
-                {csat.rate >= goals.csat ? "na meta" : "abaixo da meta"}
-              </span>
-            )}
-          </div>
-          <div className="kpi-body"><strong>{csat.rate === null ? "—" : `${fmt(csat.rate)}%`}</strong></div>
-          <p>meta {goals.csat}%</p>
-        </article>
-        <article className="kpi-card">
-          <div className="kpi-header"><small>TICKETS CRÍTICOS</small></div>
-          <div className="kpi-body"><strong>{criticalCount}</strong></div>
-          <p>{cs.length ? `${fmt((criticalCount / cs.length) * 100)}% dos avaliados` : "—"}</p>
-        </article>
-      </section>
-
-      <div className="grid-2">
-        <section className="panel">
-          <h3>Distribuição por conceito</h3>
-          <ConceptDistribution list={cs} />
-        </section>
-        <section className="panel">
-          <h3>Média por parâmetro</h3>
-          <ParamBars list={cs} scorecard={scorecard} />
-        </section>
-      </div>
-
-      <section className="panel" style={{ marginBottom: 24 }}>
-        <h3>Conceitos por time</h3>
-        <div className="table-wrap" style={{ marginTop: 12 }}>
-          <table>
-            <thead>
-              <tr>
-                <th>TIME</th>
-                <th>AVALIADOS</th>
-                <th>NOTA MÉDIA</th>
-                {CONCEPTS.map((c) => <th key={c}>{c.toUpperCase()}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {teamRows.map((t) => (
-                <tr key={t.name}>
-                  <td><strong>{t.name}</strong></td>
-                  <td>{t.count}</td>
-                  <td>{t.count ? fmt(t.score) : "—"}</td>
-                  {CONCEPTS.map((c) => (
-                    <td key={c}>
-                      {t.counts[c]} <span className="muted-text">({t.count ? fmt((t.counts[c] / t.count) * 100, 0) : 0}%)</span>
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="panel" style={{ marginBottom: 24 }}>
-        <h3>Alertas para a liderança</h3>
-        <p className="muted">Prioridade possivelmente rebaixada e tickets Críticos (nota de {rangeLabel("Crítico", scorecard)}).</p>
-        {alerts.length === 0 ? (
-          <p className="empty">Nenhum alerta no período.</p>
-        ) : (
-          <div className="table-wrap" style={{ marginTop: 12 }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>SEMANA</th>
-                  <th>CONSULTOR</th>
-                  <th>TICKET</th>
-                  <th>NOTA</th>
-                  <th>ALERTA</th>
-                  <th>PONTO DE ATENÇÃO</th>
-                </tr>
-              </thead>
-              <tbody>
-                {alerts.slice(0, 30).map((r) => (
-                  <tr key={r.id}>
-                    <td>{r.week || "—"}</td>
-                    <td><strong>{r.consultor}</strong></td>
-                    <td>{r.ticket ? <span className="ticket">#{r.ticket}</span> : "—"}</td>
-                    <td>{r.nota === null ? "—" : fmt(r.nota, 0)}</td>
-                    <td>{r.flag ? "Prioridade possivelmente rebaixada" : "Ticket Crítico"}</td>
-                    <td className="wrap-cell">{r.attention || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section className="panel">
-        <h3>Por categoria</h3>
-        {categoryRows.length === 0 ? (
-          <p className="empty">Sem monitorias no período.</p>
-        ) : (
-          <div className="table-wrap" style={{ marginTop: 12 }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>CATEGORIA</th>
-                  <th>AVALIADOS</th>
-                  <th>NOTA MÉDIA</th>
-                  <th>CRÍTICOS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {categoryRows.map((c) => (
-                  <tr key={c.name}>
-                    <td><strong>{c.name}</strong></td>
-                    <td>{c.count}</td>
-                    <td>{fmt(c.score)}</td>
-                    <td>{c.critical}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-    </main>
-  );
-}
-
-/* =====================================================================
-   CONFIGURAÇÕES
-   ===================================================================== */
-
-function LoginScreen({
-  notice,
-  onSignedIn,
-  onDemo,
-}: {
-  notice: string;
-  onSignedIn: (session: SbSession) => void;
-  onDemo: () => void;
-}) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      onSignedIn(await sbSignIn(email.trim(), password));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Não foi possível entrar.");
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="login-wrap">
-      <form className="login-card" onSubmit={submit}>
-        <div className="brand" style={{ marginBottom: 20 }}>
-          <div className="logo-mark">Q</div>
-          <div>
-            <strong>Qualitá</strong>
-            <span>MONITORIA</span>
-          </div>
-        </div>
-        <h2>Entrar</h2>
-        <p className="muted">Use o e-mail e a senha cadastrados para você. Os dados de desempenho são de acesso restrito.</p>
-        {notice && <div className="notice">{notice}</div>}
-        <label className="field-label" style={{ marginTop: 18 }}>E-MAIL</label>
-        <input
-          className="input"
-          type="email"
-          autoFocus
-          autoComplete="username"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-        <label className="field-label" style={{ marginTop: 14 }}>SENHA</label>
-        <input
-          className="input"
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        {error && <p className="negative" style={{ margin: "12px 0 0" }}>{error}</p>}
-        <button className="primary-button" type="submit" disabled={busy || !email || !password} style={{ width: "100%", marginTop: 18 }}>
-          {busy ? "Entrando…" : "Entrar"}
-        </button>
-        <button type="button" className="link-button" onClick={onDemo} style={{ marginTop: 14 }}>
-          Ver modo demonstração (dados fictícios)
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function Settings({
-  goals,
-  setGoals,
-  sheet,
-  reload,
-  sbConfigured,
-  session,
-  table,
-  setTable,
-  onSignOut,
-}: {
-  goals: Goals;
-  setGoals: (goals: Goals) => void;
-  sheet: SheetState;
-  reload: () => void;
-  sbConfigured: boolean;
-  session: SbSession | null;
-  table: string;
-  setTable: (table: string) => void;
-  onSignOut: () => void;
-}) {
-  const [csat, setCsat] = useState(String(goals.csat));
-  const [agreement, setAgreement] = useState(String(goals.agreement));
-  const [feedback, setFeedback] = useState(String(goals.feedback));
-  const [message, setMessage] = useState("");
-  const [tableInput, setTableInput] = useState(table);
-  const [tableError, setTableError] = useState("");
-
-  const saveTable = () => {
-    const value = tableInput.trim();
-    if (!/^[A-Za-z0-9_]+$/.test(value)) {
-      setTableError("Use só letras, números e _ no nome da tabela (sem espaços nem acentos).");
-      return;
-    }
-    setTableError("");
-    if (value === table) reload();
-    else setTable(value);
-  };
-
-  const saveGoals = () => {
-    const c = Number(csat);
-    const a = Number(agreement);
-    const f = Number(feedback);
-    if ([c, a, f].some((n) => !(n >= 0 && n <= 100))) {
-      setMessage("Verifique os valores: cada meta deve ficar entre 0 e 100.");
-      return;
-    }
-    setGoals({ csat: c, agreement: a, feedback: f });
-    setMessage("Metas salvas com sucesso!");
-  };
-
-  const statusLabel =
-    sheet.status === "ok"
-      ? "Conectado"
-      : sheet.status === "loading"
-      ? "Carregando…"
-      : sheet.status === "error"
-      ? "Com erro"
-      : "Não conectado (modo demonstração)";
-
-  const paramMissing = sheet.status === "ok" && sheet.mapping.filter((m) => /^p[1-5]$/.test(m.field) && !m.header).length > 0;
-  const sqlTable = /^[A-Za-z0-9_]+$/.test(table) ? table : SB_DEFAULT_TABLE;
-
-  return (
-    <main className="content">
-      <div className="panel">
-        <div className="page-actions">
-          <div>
-            <h3>Fonte de dados (Supabase)</h3>
-            <p className="muted">Dashboard, Monitorias, Equipe e Relatórios leem desta tabela.</p>
-          </div>
-          <div className={`badge ${sheet.status === "ok" ? "ok" : "warn"}`}>{statusLabel}</div>
-        </div>
-
-        {sbConfigured ? (
-          <>
-            <div className="info-grid">
-              <div><small>PROJETO</small><strong>{SB_URL.replace(/^https?:\/\//, "")}</strong></div>
-              <div><small>USUÁRIO</small><strong>{session ? session.email : "não logado"}</strong></div>
-            </div>
-            <div className="inline-form" style={{ marginTop: 16 }}>
-              <div style={{ flex: 1 }}>
-                <label className="field-label">NOME DA TABELA</label>
-                <input
-                  className="input"
-                  value={tableInput}
-                  onChange={(e) => {
-                    setTableInput(e.target.value);
-                    setTableError("");
-                  }}
-                  placeholder={SB_DEFAULT_TABLE}
-                />
-              </div>
-              <button className="primary-button" onClick={saveTable}>Salvar e recarregar</button>
-              {session && <button className="secondary-button" onClick={onSignOut}>Sair</button>}
-            </div>
-            {tableError && <p className="negative" style={{ margin: "10px 0 0" }}>{tableError}</p>}
-          </>
-        ) : (
-          <div className="notice">Supabase não configurado (defina VITE_SUPABASE_URL e VITE_SUPABASE_KEY).</div>
-        )}
-        {sheet.status === "error" && <div className="notice">{sheet.message}</div>}
-
-        <div className="rule-block" style={{ marginTop: 16 }}>
-          <strong>Como preparar os dados no Supabase</strong>
-          <ol className="steps">
-            <li>
-              <b>Tabela:</b> em <b>Table Editor → New table → Import data via spreadsheet</b>, envie o CSV baixado da planilha
-              (<b>Arquivo → Fazer download → CSV</b>) e dê à tabela o nome <code>{sqlTable}</code>. O painel reconhece as colunas pelo nome do cabeçalho.
-            </li>
-            <li>
-              <b>Proteção (RLS):</b> abra o <b>SQL Editor</b>, cole o código abaixo e execute. Ele deixa só usuários logados lerem a tabela.
-            </li>
-            <li>
-              <b>Usuários:</b> em <b>Authentication → Users → Add user → Create new user</b>, informe e-mail e senha e marque <b>Auto Confirm User</b>.
-            </li>
-          </ol>
-          <pre className="code">{`alter table public.${sqlTable} enable row level security;
-
-create policy "leitura para usuarios logados"
-  on public.${sqlTable} for select
-  to authenticated
-  using (true);`}</pre>
-          <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-            Use somente a chave <b>publishable</b> no painel. Nunca coloque a chave <b>secret</b> ou <b>service_role</b> aqui. Enquanto TI e jurídico não aprovarem o uso dos dados reais, importe apenas dados fictícios ou anonimizados.
-          </p>
-        </div>
-
-        {sheet.status === "ok" && (
-          <div style={{ marginTop: 16 }}>
-            <div className="editor-title">COLUNAS RECONHECIDAS</div>
-            {paramMissing && (
-              <div className="notice">
-                Algumas colunas dos 5 parâmetros não foram encontradas. Sem elas, a ferramenta usa só a nota total e não mostra a média por parâmetro.
-              </div>
-            )}
-            <div className="table-wrap" style={{ marginTop: 8 }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>CAMPO DA FERRAMENTA</th>
-                    <th>COLUNA NA TABELA</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sheet.mapping.map((m) => (
-                    <tr key={m.field}>
-                      <td>{m.label}</td>
-                      <td>
-                        {m.header ? (
-                          <span className="positive">{m.header}</span>
-                        ) : (
-                          <span className="muted-text">não encontrada</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="panel" style={{ marginTop: 20 }}>
-        <h3>Metas do processo</h3>
-        <p className="muted">Indicadores da seção 8 do Processo de Monitoria. A régua e os parâmetros ficam na página Parâmetros.</p>
-        <div style={{ marginTop: 16, display: "grid", gap: 16 }}>
-          <div className="rule-block">
-            <strong>CSAT (meta, %)</strong>
-            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>Indicador de resultado. Usado nos cards de CSAT do Dashboard e do relatório.</p>
-            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={csat} onChange={(e) => setCsat(e.target.value)} />
-          </div>
-          <div className="rule-block">
-            <strong>Concordância IA × analista (meta, %)</strong>
-            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>Referência para a liberação do agente de IA (fase 06). Ainda não calculada pela ferramenta.</p>
-            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={agreement} onChange={(e) => setAgreement(e.target.value)} />
-          </div>
-          <div className="rule-block">
-            <strong>Feedbacks aplicados no prazo (meta, %)</strong>
-            <p className="muted" style={{ fontSize: 12, margin: "4px 0 10px" }}>Execução do ciclo pela liderança (até sexta-feira). Ainda não calculada pela ferramenta.</p>
-            <input className="input" style={{ width: 120 }} type="number" min={0} max={100} value={feedback} onChange={(e) => setFeedback(e.target.value)} />
-          </div>
-        </div>
-        <button className="primary-button" style={{ marginTop: 20 }} onClick={saveGoals}>Salvar metas</button>
-        {message && <div className="notice success" style={{ marginTop: 14 }}>{message}</div>}
-      </div>
-    </main>
-  );
-}
-
-/* =====================================================================
-   SCORECARD DO CONSULTOR (drawer)
-   ===================================================================== */
-
-function AuditDrawer({
-  person,
-  records,
-  scorecard,
-  close,
-}: {
-  person: Person | null;
-  records: Monitoria[];
-  scorecard: Scorecard;
-  close: () => void;
-}) {
-  const own = records.filter((r) => !person || norm(r.consultor) === norm(person.name));
-  const cs = scored(own);
-  const latest = [...own].sort((a, b) => (b.date ?? 0) - (a.date ?? 0)).slice(0, 10);
-
-  return (
-    <div className="drawer-overlay" onClick={close}>
-      <div className="drawer" onClick={(e) => e.stopPropagation()} style={{ width: 560, display: "flex", flexDirection: "column", padding: 0 }}>
-        <div className="drawer-header" style={{ padding: 20, borderBottom: "1px solid var(--line)", marginBottom: 0 }}>
-          <div>
-            <h3>{person ? `Scorecard de ${person.name}` : "Scorecard geral"}</h3>
-            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>{person ? person.team : "Todos os consultores"}</p>
-          </div>
-          <button onClick={close} className="secondary-button">Fechar</button>
-        </div>
-        <div className="drawer-body" style={{ padding: 20, overflowY: "auto", flex: 1 }}>
-          {own.length === 0 ? (
-            <p className="empty">Nenhuma monitoria registrada.</p>
-          ) : (
-            <>
-              <div className="kpi-body" style={{ marginTop: 0 }}>
-                <strong>{fmt(avg(cs.map((r) => r.nota)))}</strong>
-                <span>/ 10 · nota média em {cs.length} monitorias</span>
-              </div>
-
-              <div className="editor-title" style={{ marginTop: 20 }}>DISTRIBUIÇÃO POR CONCEITO</div>
-              <ConceptDistribution list={cs} />
-
-              <div className="editor-title" style={{ marginTop: 24 }}>MÉDIA POR PARÂMETRO</div>
-              <ParamBars list={cs} scorecard={scorecard} />
-
-              <div className="editor-title" style={{ marginTop: 24 }}>ÚLTIMAS MONITORIAS</div>
-              <div className="block-items" style={{ marginTop: 10 }}>
-                {latest.map((r) => (
-                  <div key={r.id} className="rule-block" style={{ lineHeight: 1.7 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                      <strong>{person ? r.categoria || "Sem categoria" : r.consultor}</strong>
-                      <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        {r.disregarded ? <span className="muted-text">Desconsiderado</span> : <strong>{fmt(r.nota ?? 0, 0)}</strong>}
-                        <ConceptPill concept={r.concept} />
-                      </span>
-                    </div>
-                    <div className="muted" style={{ fontSize: 12, margin: 0 }}>
-                      {[r.week, r.ticket && `#${r.ticket}`, r.csat && `CSAT: ${r.csat}`, r.flag && "Prioridade possivelmente rebaixada"]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </div>
-                    {r.scores && (
-                      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                        {r.scores.map((s, i) => <ScoreCell key={i} value={s} />)}
-                      </div>
-                    )}
-                    {r.attention && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{r.attention}</div>}
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* =====================================================================
-   APP
-   ===================================================================== */
-
-export default function App() {
-  const [page, setPage] = useState("dashboard");
-  const [auditOpen, setAuditOpen] = useState(false);
-  const [auditPerson, setAuditPerson] = useState<Person | null>(null);
-
-  const [registered, setRegistered] = usePersistentState<Person[]>("qualita:v2:people", []);
-  const [teams, setTeams] = usePersistentState<string[]>("qualita:v2:teams", []);
-  const [scorecard, setScorecard] = usePersistentState<Scorecard>("qualita:v3:scorecard", DEFAULT_SCORECARD);
-  const [goals, setGoals] = usePersistentState<Goals>("qualita:v3:goals", DEFAULT_GOALS);
-  const [session, setSession] = usePersistentState<SbSession | null>("qualita:v3:session", null);
-  const [table, setTable] = usePersistentState<string>("qualita:v3:table", SB_DEFAULT_TABLE);
-  const [previewDemo, setPreviewDemo] = useState(false);
-  const [sessionExpired, setSessionExpired] = useState(false);
-
-  const sbConfigured = Boolean(SB_URL && SB_KEY);
-  const csvUrl = resolveSheetUrl(ENV_URL);
-  const tableName = table.trim() || SB_DEFAULT_TABLE;
-
-  /* Fonte dos dados: Supabase (com login) > planilha publicada (só se o Supabase não estiver configurado) > demonstração */
-  let source: DataSource = { key: "demo", load: null };
-  if (sbConfigured) {
-    if (session && !previewDemo) {
-      const current = session;
-      source = {
-        key: `sb|${tableName}|${current.email}`,
-        load: () => sbFetchRows(tableName, makeTokenGetter(current, setSession)),
-      };
-    }
-  } else if (csvUrl) {
-    source = { key: `csv|${csvUrl}`, load: () => fetchCsvRows(csvUrl) };
-  }
-
-  const [sheet, reload] = useSheet(source);
-  const isDemo = sheet.status === "demo";
-
-  /* Sessão vencida ou recusada pelo Supabase: volta para a tela de login */
-  useEffect(() => {
-    if (sheet.authExpired) {
-      setSession(null);
-      setSessionExpired(true);
-    }
-  }, [sheet.authExpired, setSession]);
-
-  /* O conceito vem da fonte de dados quando existir; senão é calculado pela régua do scorecard */
-  const records = useMemo(
-    () =>
-      sheet.records.map((r) =>
-        r.nota === null || r.concept ? r : { ...r, concept: conceptOf(r.nota, scorecard) }
-      ),
-    [sheet.records, scorecard]
-  );
-
-  const people = useMemo(
-    () => buildPeople(isDemo ? [...DEMO_PEOPLE, ...registered] : registered, records),
-    [isDemo, registered, records]
-  );
-  const teamList = useMemo(
-    () => buildTeamList(isDemo ? [...DEMO_TEAMS, ...teams] : teams, people),
-    [isDemo, teams, people]
-  );
-
-  /* Define o time de uma pessoa (cria o cadastro se ela só existir na fonte de dados) */
-  const assignTeam = (name: string, team: string) => {
-    const key = norm(name);
-    const exists = registered.some((p) => norm(p.name) === key);
-    if (exists) {
-      setRegistered(registered.map((p) => (norm(p.name) === key ? { ...p, team } : p)));
-    } else {
-      const person: Person = {
-        id: Date.now(),
-        name,
-        team,
-        initials: initialsOf(name),
-        color: PALETTE[people.length % PALETTE.length],
-      };
-      setRegistered([...registered, person]);
-    }
-  };
-
-  const openAudit = (person?: Person) => {
-    setAuditPerson(person ?? null);
-    setAuditOpen(true);
-  };
-
-  const signOut = () => {
-    if (session) {
-      fetch(`${SB_URL}/auth/v1/logout`, {
-        method: "POST",
-        headers: { apikey: SB_KEY, Authorization: `Bearer ${session.access_token}` },
-      }).catch(() => undefined);
-    }
-    setSession(null);
-    setPreviewDemo(false);
-    setSessionExpired(false);
-  };
-
-  if (sbConfigured && !session && !previewDemo) {
-    return (
-      <LoginScreen
-        notice={sessionExpired ? "Sua sessão expirou. Entre novamente." : ""}
-        onSignedIn={(s) => {
-          setSession(s);
-          setSessionExpired(false);
-        }}
-        onDemo={() => setPreviewDemo(true)}
-      />
-    );
-  }
-
-  return (
-    <div className="app-container">
-      <Sidebar page={page} setPage={setPage} userEmail={session?.email} onSignOut={session ? signOut : undefined} />
-      <div className="workspace">
-        <Header page={page} />
-        {page !== "settings" && (
-          <SourceBanner
-            sheet={sheet}
-            reload={reload}
-            goSettings={() => setPage("settings")}
-            onLogin={sbConfigured && !session ? () => setPreviewDemo(false) : undefined}
-            label={sbConfigured ? "Supabase" : "arquivo CSV"}
-          />
-        )}
-        {page === "dashboard" && (
-          <Dashboard
-            people={people}
-            records={records}
-            teamList={teamList}
-            scorecard={scorecard}
-            goals={goals}
-            openAudit={openAudit}
-          />
-        )}
-        {page === "monitorias" && <Monitorias records={records} />}
-        {page === "parameters" && <Parameters scorecard={scorecard} setScorecard={setScorecard} />}
-        {page === "team" && (
-          <Team
-            people={people}
-            records={records}
-            teams={teams}
-            teamList={teamList}
-            setTeams={setTeams}
-            assignTeam={assignTeam}
-            openAudit={openAudit}
-          />
-        )}
-        {page === "reports" && (
-          <Reports people={people} records={records} teamList={teamList} scorecard={scorecard} goals={goals} />
-        )}
-        {page === "settings" && (
-          <Settings
-            goals={goals}
-            setGoals={setGoals}
-            sheet={sheet}
-            reload={reload}
-            sbConfigured={sbConfigured}
-            session={session}
-            table={tableName}
-            setTable={setTable}
-            onSignOut={signOut}
-          />
-        )}
-      </div>
-      {auditOpen && <AuditDrawer person={auditPerson} records={records} scorecard={scorecard} close={() => setAuditOpen(false)} />}
-    </div>
-  );
-}
+                  <tr key={row.id} onClick={() => openAudit
